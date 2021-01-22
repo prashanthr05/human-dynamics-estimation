@@ -18,6 +18,8 @@
         <param name="useXsensJointsAngles">false</param>
         <param name="allowIKFailures">true</param>
         <param name="useDirectBaseMeasurement">false</param>
+        <!-- baseState options: standard, direct, fixed, external -->
+        <param name="baseState">external</param>
         <!-- optimization parameters -->
         <param name="maxIterationsIK">300</param>
         <param name="ikLinearSolver">ma27</param>
@@ -44,6 +46,54 @@
         <param name="integrationBasedIKMeasuredVelocityGainLinRot">(1.0 1.0)</param>
         <param name="integrationBasedIKCorrectionGainsLinRot">(8.0 20.0)</param>
         <param name="integrationBasedIKIntegralCorrectionGainsLinRot">(0.0 0.0)</param>
+        
+        <!-- Begin BipedalLocomotionFramework components configuration -->
+        <group name="ModelInfo">
+            <param name="base_link">Pelvis</param>
+            <!-- BLF estimators are base-link IMU centric for model computations, 
+                 only the outputs are transformed to base link.
+                 since it is a required parameter, we can use the same frames for both -->
+            <param name="base_link_imu">Pelvis</param>
+            <!-- These are required parameters for model configuration, 
+                 eventhough they are unused by BLF LeggedOdom -->
+            <param name="left_foot_contact_frame">LeftFoot</param>
+            <param name="right_foot_contact_frame">RightFoot</param>
+        </group>
+        <group name="LeggedOdom">
+            <!-- This configuration  must be carried out internally 
+                  once the kinematic calibration is performes-->
+            <param name="initial_fixed_frame">Pelvis</param>            
+            <param name="initial_ref_frame_for_world">RightFoot</param>
+            <!-- quaternion w x y z -->
+            <param name="initial_world_orientation_in_ref_frame">(1., 0., 0., 0.)</param>
+            <param name="initial_world_position_in_ref_frame">(0., 0., 0.)</param>
+        </group>
+        <group name="ContactBayesFilter">
+            <param name="verbose">true</param>
+            <!-- if set to false, we need to provide the urdf_mesh_files_prefix
+                 for loading the meshes specified in the urdf model-->
+            <param name="no_collision_meshes">true</param>
+            <!-- links for which collision elements will be used for contact detection-->
+            <param name="contact_links">(LeftFoot, RightFoot)</param>            
+            <!-- parameters for drawing transition probabilites of contact 
+                 based on distance to nearest contact plane-->
+            <param name="contact_distance_mean">0.98</param>
+            <param name="contact_distance_deviation">0.07</param>            
+            <!-- parameters for drawing likelihood probabilites of contact 
+                 based on collision vertex velocities -->
+            <param name="contact_velocity_norm_mean">0.01</param>
+            <param name="contact_velocity_norm_deviation">0.2</param>            
+            <!-- parameters for drawing likelihood probabilites of contact 
+                 based on collision vertex velocities on logistic distribution -->
+            <param name="swing_velocity_norm_mean">0.35</param>
+            <param name="swing_velocity_norm_deviation">0.72</param>            
+            <!-- fused probability threshold to infer contact -->
+            <param name="contact_probability_threshold">0.57</param>            
+            <!-- use individual contact vertices instead of link contacts -->
+            <param name="use_individual_vertex_contacts">false</param>            
+        </group>
+        <!-- End BipedalLocomotionFramework components configuration -->
+        
         <group name="MODEL_TO_DATA_LINK_NAMES">
             <param name="map_Pelvis">(Pelvis, XsensSuit::vLink::Pelvis)</param>
             <param name="map_L5">(L5, XsensSuit::vLink::L5)</param>

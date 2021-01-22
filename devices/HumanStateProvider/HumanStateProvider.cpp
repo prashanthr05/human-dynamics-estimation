@@ -22,6 +22,13 @@
 #include <iDynTree/Core/EigenHelpers.h>
 #include <iDynTree/Model/Traversal.h>
 
+#include <BipedalLocomotion/ParametersHandler/YarpImplementation.h>
+#include <BipedalLocomotion/FloatingBaseEstimators/LeggedOdometry.h>
+#include <BipedalLocomotion/ContactDetectors/ContactBayesFilter.h>
+//for logging
+#include <BipedalLocomotion/Conversions/matioCppConversions.h>
+
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -60,6 +67,7 @@ constexpr double DefaultPeriod = 0.01;
 
 using namespace hde::devices;
 using namespace wearable;
+using namespace BipedalLocomotion;
 
 // ==============
 // IMPL AND UTILS
@@ -118,6 +126,14 @@ enum rpcCommand
     calibrateRelativeLink,
     setRotationOffset,
     resetCalibration,
+};
+
+enum class BaseState
+{
+    standard, // not direct and not fixed base
+    direct,   // use base pose measurements from 
+    fixed,    // fixed base pose
+    external  // base pose estimated by BipedalLocomotionFramework estimator
 };
 
 // Container of data coming from the wearable interface
@@ -231,7 +247,7 @@ public:
     void computeSecondaryCalibrationRotationsForChain(const std::vector<iDynTree::JointIndex>& jointZeroIndices, const iDynTree::Transform &baseTransform, const std::vector<iDynTree::LinkIndex>& linkToCalibrateIndices);
 
     SolverIK ikSolver;
-
+    
     // flags
     bool useDirectBaseMeasurement;
     bool useFixedBase;
@@ -244,9 +260,11 @@ public:
     double lastTime{-1.0};
 
     // kinDynComputation
-    std::unique_ptr<iDynTree::KinDynComputations> kinDynComputations;
+    std::shared_ptr<iDynTree::KinDynComputations> kinDynComputations;
     iDynTree::Vector3 worldGravity;
-
+    
+    
+    
     // get input data
     bool getJointAnglesFromInputData(iDynTree::VectorDynSize& jointAngles);
     bool getLinkTransformFromInputData(std::unordered_map<std::string, iDynTree::Transform>& t);
@@ -285,6 +303,25 @@ public:
         iDynTree::Twist baseVelocity,
         std::unordered_map<std::string, iDynTree::Vector3>& linkAngularVelocityError);
 
+    // external base estimator and contact detector methods
+    bool setupExternalBaseEstimator(yarp::os::Searchable& config);
+    bool setupExternalContactDetector(yarp::os::Searchable& config);
+    bool initializeEstimatorWorld();
+    bool updateExternalEstimatorAndDetector();
+    bool logData();
+    
+    // log data
+    Eigen::VectorXd lfTime, lfContact, rfTime, rfContact, estTime;
+    Eigen::MatrixXd extPos, extRot;
+    Eigen::MatrixXd linkPos, linkRot;
+
+    // external base estimator and contact detector
+    std::unique_ptr<Estimators::LeggedOdometry> extLeggedOdom;
+    std::unique_ptr<Estimators::ContactBayesManager> extContactDetector;
+    bool firstRun{true};
+    int itrCount{0};
+    BaseState baseState{BaseState::external};
+    
     // constructor
     impl();
 };
@@ -436,7 +473,7 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
     std::string baseFrameName;
     if(config.check("floatingBaseFrame") && config.find("floatingBaseFrame").isList() ) {
               baseFrameName = config.find("floatingBaseFrame").asList()->get(0).asString();
-              pImpl->useFixedBase = false;
+              pImpl->useFixedBase = false;              
               yWarning() << LogPrefix << "'floatingBaseFrame' configuration option as list is deprecated. Please use a string with the model base name only.";
     }
     else if(config.check("floatingBaseFrame") && config.find("floatingBaseFrame").isString() ) {
@@ -450,7 +487,7 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
     }
     else if(config.check("fixedBaseFrame") && config.find("fixedBaseFrame").isString() ) {
               baseFrameName = config.find("fixedBaseFrame").asString();
-              pImpl->useFixedBase = true;
+              pImpl->useFixedBase = true;              
     }
     else {
         yError() << LogPrefix << "BaseFrame option not found or not valid";
@@ -802,8 +839,8 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
     pImpl->worldGravity(2) = -9.81;
 
     // Initialize kinDyn computation
-    pImpl->kinDynComputations =
-        std::unique_ptr<iDynTree::KinDynComputations>(new iDynTree::KinDynComputations());
+    pImpl->kinDynComputations = std::make_shared<iDynTree::KinDynComputations>();
+        
     pImpl->kinDynComputations->loadRobotModel(modelLoader.model());
     pImpl->kinDynComputations->setFloatingBase(pImpl->floatingBaseFrame);
 
@@ -1082,6 +1119,18 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
         }
     }
 
+    // ==================================
+    // INITIALIZE EXTERNAL BASE ESTIMATOR
+    // ==================================
+    if (pImpl->baseState == BaseState::external) {
+        if (!pImpl->setupExternalBaseEstimator(config)) {
+            return false;
+        }
+        if (!pImpl->setupExternalContactDetector(config)) {
+            return false;
+        }
+    }
+    
     // ===================
     // INITIALIZE RPC PORT
     // ===================
@@ -1104,6 +1153,50 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
 
     return true;
 }
+
+bool HumanStateProvider::impl::setupExternalBaseEstimator(yarp::os::Searchable& config)
+{
+    extLeggedOdom = std::make_unique<Estimators::LeggedOdometry>();
+    
+    auto originalHandler = std::make_shared<ParametersHandler::YarpImplementation>();
+    originalHandler->set(config);    
+    ParametersHandler::IParametersHandler::shared_ptr parameterHandler = originalHandler;
+    // set required parameter for base estimator
+    parameterHandler->setParameter("sampling_period_in_s", period);
+    
+    if (!extLeggedOdom->initialize(parameterHandler, kinDynComputations)) {
+        yError() << LogPrefix << "Could not configure external base estimator - LeggedOdometry.";
+        return false;
+    }
+    
+    yInfo() << LogPrefix << "Configured external base estimator - LeggedOdometry - successfully.";
+    return true;
+}
+
+bool HumanStateProvider::impl::setupExternalContactDetector(yarp::os::Searchable& config)
+{
+    extContactDetector = std::make_unique<Estimators::ContactBayesManager>();
+    
+    auto originalHandler = std::make_shared<ParametersHandler::YarpImplementation>();
+    originalHandler->set(config);    
+    ParametersHandler::IParametersHandler::shared_ptr parameterHandler = originalHandler;
+    bool ok{true};
+    
+    ok = ok && extContactDetector->initialize(parameterHandler);
+    ok = ok && extContactDetector->setKinDyn(kinDynComputations);
+    ok = ok && extContactDetector->prepare();
+    
+    if (!ok)    
+    {
+        yError() << LogPrefix << "Could not configure external contact detector - Contact Bayes Manager.";
+        return false;
+    }
+        
+    yInfo() << LogPrefix << "Configured external contact detector - Contact Bayes Manager - successfully.";
+    
+    return true;
+}
+
 
 bool HumanStateProvider::close()
 {
@@ -1181,6 +1274,14 @@ void HumanStateProvider::run()
     else if (pImpl->useDirectBaseMeasurement) {
         pImpl->baseTransformSolution = pImpl->linkTransformMatrices.at(pImpl->floatingBaseFrame);
         pImpl->baseVelocitySolution = pImpl->linkVelocities.at(pImpl->floatingBaseFrame);
+    }
+        
+    if (pImpl->baseState == BaseState::external) {
+        bool baseEstimationFailure = !pImpl->updateExternalEstimatorAndDetector();
+        if (baseEstimationFailure) {
+            yWarning() << LogPrefix << "Base estimation failed, keeping the previous solution";
+            return;
+        }
     }
 
     // CoM position and velocity
@@ -1342,6 +1443,143 @@ void HumanStateProvider::impl::computeSecondaryCalibrationRotationsForChain(cons
         }
     }
 }
+
+
+bool HumanStateProvider::impl::updateExternalEstimatorAndDetector()
+{
+    if (itrCount < 100)
+    {
+        if (itrCount == 99)
+        {
+            initializeEstimatorWorld();
+        }
+        itrCount++;
+        firstRun = false;
+        return true;
+    }
+    
+    if (!extLeggedOdom->setKinematics(iDynTree::toEigen(jointConfigurationSolution),
+                                 iDynTree::toEigen(jointVelocitiesSolution)))
+    {
+        return false;
+    }
+    
+    extContactDetector->setCurrentTime(yarp::os::Time::now());
+    // other measurements retrieved from shared kindyncomputations
+    if (!extContactDetector->advance()) {
+        yError() << LogPrefix << "Could not update the contact detector" ;
+        return false;
+    }
+                
+    auto contactMap = extContactDetector->get();
+    for ( auto& [name, contact] : contactMap )
+    {
+        if (name == "LeftFoot") {
+            auto size = lfContact.size();
+            lfContact.conservativeResize(size+1);
+            lfTime.conservativeResize(size+1);
+            lfContact(size) = 300*static_cast<int>(contact.isActive);
+
+            lfTime(size) = contact.lastUpdateTime;
+        }
+        if (name == "RightFoot") {
+            auto size = rfContact.size();
+            rfContact.conservativeResize(size+1);
+            rfTime.conservativeResize(size+1);
+            rfContact(size) = 300*static_cast<int>(contact.isActive);            
+            rfTime(size) = contact.lastUpdateTime;
+        }
+        extLeggedOdom->setContactStatus(name, contact.isActive, contact.switchTime);                
+    }
+    
+    if (!extLeggedOdom->advance()) {
+        yError() << LogPrefix << "Could not update the external base estimator" ;
+        return false;
+    }
+    
+    auto out = extLeggedOdom->get();
+    auto pEst = out.basePose.getPosition();
+    auto rpyEst = out.basePose.getRotation().asRPY();
+    auto estSize = estTime.rows(); 
+    estTime.conservativeResize(estSize+1);
+    extPos.conservativeResize(estSize+1, 3);
+    extRot.conservativeResize(estSize+1, 3);
+    extPos.row(estSize) << pEst(0), pEst(1), pEst(2);
+    extRot.row(estSize) << rpyEst(0), rpyEst(1), rpyEst(2);
+    
+    auto pOut = linkTransformMatricesRaw.at("Pelvis").getPosition();
+    auto rpyOut = linkTransformMatricesRaw.at("Pelvis").getRotation().asRPY();
+    linkPos.conservativeResize(estSize+1, 3);
+    linkRot.conservativeResize(estSize+1, 3);
+    linkPos.row(estSize) << pOut(0), pOut(1), pOut(2);
+    linkRot.row(estSize) << rpyOut(0), rpyOut(1), rpyOut(2);
+    
+    return true;
+}
+
+bool HumanStateProvider::impl::initializeEstimatorWorld()
+{
+    if (!extLeggedOdom->setKinematics(iDynTree::toEigen(jointConfigurationSolution),
+                                 iDynTree::toEigen(jointVelocitiesSolution)))
+    {
+        return false;
+    }
+    
+    auto w_H_b =  linkTransformMatricesRaw.at("Pelvis");
+    auto quat = w_H_b.getRotation().asQuaternion();
+    
+    if (!extLeggedOdom->resetEstimator(Eigen::Quaterniond(quat(1), quat(0), quat(2), quat(3)),
+                                       iDynTree::toEigen(w_H_b.getPosition())))
+    {
+        return false;
+    }
+    return true;
+}
+
+
+bool HumanStateProvider::impl::logData()
+{
+    matioCpp::File file = matioCpp::File::Create("out.mat");
+    matioCpp::MultiDimensionalArray<double> outEstPos{"estBasePos", 
+                                                      {static_cast<std::size_t>(extPos.rows()), static_cast<std::size_t>(extPos.cols())}, 
+                                                      extPos.data()};
+    matioCpp::MultiDimensionalArray<double> outEstRot{"estBaseRot", 
+                                                      {static_cast<std::size_t>(extRot.rows()), static_cast<std::size_t>(extRot.cols())}, 
+                                                      extRot.data()};
+    matioCpp::MultiDimensionalArray<double> outLinkPos{"linkBasePos", 
+                                                      {static_cast<std::size_t>(linkPos.rows()), static_cast<std::size_t>(linkPos.cols())}, 
+                                                      linkPos.data()};
+    matioCpp::MultiDimensionalArray<double> outLinkRot{"linkBaseRot", 
+                                                      {static_cast<std::size_t>(linkRot.rows()), static_cast<std::size_t>(linkRot.cols())}, 
+                                                      linkRot.data()};
+                                                      
+    auto outContactlf = Conversions::tomatioCpp(lfContact, "estLFContact");
+    auto outContactrf = Conversions::tomatioCpp(rfContact, "estRFContact");
+    auto outContactlfTime = Conversions::tomatioCpp(lfTime, "estLFContactTime");
+    auto outContactrfTime = Conversions::tomatioCpp(rfTime, "estRFContactTime");
+    auto outBaseTime = Conversions::tomatioCpp(estTime, "estBaseTime");
+    
+    bool write_ok{true};
+    write_ok = write_ok && file.write(outEstPos);
+    write_ok = write_ok && file.write(outEstRot);
+    write_ok = write_ok && file.write(outLinkPos);
+    write_ok = write_ok && file.write(outLinkRot);
+    write_ok = write_ok && file.write(outContactlf);
+    write_ok = write_ok && file.write(outContactrf);
+    write_ok = write_ok && file.write(outContactlfTime);
+    write_ok = write_ok && file.write(outContactrfTime);
+    write_ok = write_ok && file.write(outBaseTime);
+    
+    
+    if (!write_ok)
+    {
+        yError() << LogPrefix << "Could not write to file." ;
+        return false;
+    }
+    
+    return true;
+}
+
 
 bool HumanStateProvider::impl::applyRpcCommand()
 {
@@ -2477,6 +2715,10 @@ bool HumanStateProvider::attach(yarp::dev::PolyDriver* poly)
 
 void HumanStateProvider::threadRelease()
 {
+    if (!pImpl->logData()) {
+        yError() << LogPrefix << "Failed to log data";
+    }
+    
     if (!pImpl->ikPool->closeIKWorkerPool()) {
         yError() << LogPrefix << "Failed to close the IKWorker pool";
     }
@@ -2487,7 +2729,7 @@ bool HumanStateProvider::detach()
     while (isRunning()) {
         stop();
     }
-
+        
     {
         std::lock_guard<std::mutex>(pImpl->mutex);
         pImpl->solution.clear();
