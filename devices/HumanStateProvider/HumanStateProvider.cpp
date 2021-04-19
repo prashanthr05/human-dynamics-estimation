@@ -10,6 +10,8 @@
 #include "IKWorkerPool.h"
 #include "InverseVelocityKinematics/InverseVelocityKinematics.hpp"
 
+#include "IHumanWrench.h"
+
 #include <Wearable/IWear/IWear.h>
 #include <iDynTree/InverseKinematics.h>
 #include <iDynTree/Model/Model.h>
@@ -21,6 +23,15 @@
 
 #include <iDynTree/Core/EigenHelpers.h>
 #include <iDynTree/Model/Traversal.h>
+
+#include <iCub/ctrl/filters.h>
+// #include <yarp/sig/Vector.h>
+#include <iDynTree/yarp/YARPConversions.h>
+
+#include <BipedalLocomotion/ParametersHandler/YarpImplementation.h>
+#include <BipedalLocomotion/FloatingBaseEstimators/LeggedOdometry.h>
+#include <BipedalLocomotion/ContactDetectors/SchmittTriggerDetector.h>
+#include <BipedalLocomotion/Conversions/matioCppConversions.h>
 
 #include <array>
 #include <atomic>
@@ -121,6 +132,14 @@ enum rpcCommand
     resetCalibration,
 };
 
+enum class BaseState
+{
+    standard, // not direct and not fixed base
+    direct,   // use base pose measurements from
+    fixed,    // fixed base pose
+    external  // base pose estimated by BipedalLocomotionFramework estimator
+};
+
 // Container of data coming from the wearable interface
 struct WearableStorage
 {
@@ -143,6 +162,7 @@ class HumanStateProvider::impl
 public:
     // Attached interface
     wearable::IWear* iWear = nullptr;
+    hde::interfaces::IHumanWrench* iHumanWrench = nullptr;
 
     bool allowIKFailures;
     bool useXsensJointsAngles;
@@ -174,6 +194,7 @@ public:
     std::unordered_map<std::string, iDynTree::Twist> linkVelocities;
     iDynTree::VectorDynSize jointConfigurationSolution;
     iDynTree::VectorDynSize jointVelocitiesSolution;
+    iDynTree::VectorDynSize jointVelocitiesSolutionFiltered;
     iDynTree::Transform baseTransformSolution;
     iDynTree::Twist baseVelocitySolution;
 
@@ -286,6 +307,44 @@ public:
         iDynTree::VectorDynSize jointVelocities,
         iDynTree::Twist baseVelocity,
         std::unordered_map<std::string, iDynTree::Vector3>& linkAngularVelocityError);
+
+    // external base estimator and contact detector methods
+    bool setupExternalBaseEstimator(yarp::os::Searchable& config);
+    bool setupExternalContactDetector(yarp::os::Searchable& config);
+    bool initializeEstimatorWorld();
+    bool updateExternalEstimatorAndDetector();
+    bool logData();
+
+    // joint velocity low pass filter
+    bool setupJointVelLowPassFilter(yarp::os::Searchable& config);
+    void lowPassFilterJointVelocities();
+
+    // external base estimator and contact detector
+    std::unique_ptr<BipedalLocomotion::Estimators::LeggedOdometry> extLeggedOdom;
+    std::unique_ptr<BipedalLocomotion::Contacts::SchmittTriggerDetector> extSchmitt;
+    std::shared_ptr<iDynTree::KinDynComputations> extKinDyn;
+    BaseState baseState{BaseState::external};
+    bool m_extEstimatorInitialized{false};
+    int itrCount{0};
+    int initThresh{400};
+    // joint velocity low pass filter
+    bool useJointVelLowPassFilter{false};
+    std::unique_ptr<iCub::ctrl::FirstOrderLowPassFilter> jointVelLowPassFilter;
+    double jointVelFiltCutoffFreq{1};
+    double jointVelFiltSamplingPeriod{0.02};
+    bool jointVelFiltInitialized{false};
+    double flatContactPlaneInclinationRoll, flatContactPlaneInclinationPitch;
+    double flatContactPlaneHeight;
+    std::string leftFootString{"LeftFoot"}, rightFootString{"RightFoot"};
+
+    // log data
+    Eigen::VectorXd lfTime, lfContact, rfTime, rfContact, estTime;
+    Eigen::VectorXd lfForce, rfForce;
+    Eigen::MatrixXd lfWrench, rfWrench;
+    Eigen::MatrixXd extPos, extRot, extLinVel, extAngVel;
+    Eigen::MatrixXd linkPos, linkRot, linkLinVel, linkAngVel;
+    Eigen::MatrixXd outjointPos, outjointVel, outjointVelFilt;
+    Eigen::VectorXd fixedFrame;
 
     // constructor
     impl();
@@ -787,8 +846,33 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
         return false;
     }
 
+    std::vector<std::string> jointList{"jL5S1_rotx",
+                                       "jRightHip_rotx",
+                                       "jLeftHip_rotx" ,"jLeftHip_roty" ,"jLeftHip_rotz",
+                                       "jLeftKnee_rotx" ,"jLeftKnee_roty", "jLeftKnee_rotz",
+                                       "jLeftAnkle_rotx", "jLeftAnkle_roty", "jLeftAnkle_rotz",
+                                       "jLeftBallFoot_rotx", "jLeftBallFoot_roty", "jLeftBallFoot_rotz",
+                                       "jRightHip_roty", "jRightHip_rotz",
+                                       "jRightKnee_rotx", "jRightKnee_roty", "jRightKnee_rotz",
+                                       "jRightAnkle_rotx", "jRightAnkle_roty", "jRightAnkle_rotz",
+                                       "jRightBallFoot_rotx", "jRightBallFoot_roty", "jRightBallFoot_rotz",
+                                       "jL5S1_roty", "jL5S1_rotz", "jL4L3_rotx", "jL4L3_roty", "jL4L3_rotz",
+                                       "jL1T12_rotx", "jL1T12_roty", "jL1T12_rotz",
+                                       "jT9T8_rotx", "jT9T8_roty", "jT9T8_rotz",
+                                       "jLeftC7Shoulder_rotx", "jT1C7_rotx",
+                                       "jRightC7Shoulder_rotx", "jRightC7Shoulder_roty", "jRightC7Shoulder_rotz",
+                                       "jRightShoulder_rotx", "jRightShoulder_roty", "jRightShoulder_rotz",
+                                       "jRightElbow_rotx", "jRightElbow_roty", "jRightElbow_rotz",
+                                       "jRightWrist_rotx", "jRightWrist_roty", "jRightWrist_rotz",
+                                       "jT1C7_roty", "jT1C7_rotz",
+                                       "jC1Head_rotx", "jC1Head_roty", "jC1Head_rotz",
+                                       "jLeftC7Shoulder_roty", "jLeftC7Shoulder_rotz",
+                                       "jLeftShoulder_rotx", "jLeftShoulder_roty", "jLeftShoulder_rotz",
+                                       "jLeftElbow_rotx", "jLeftElbow_roty", "jLeftElbow_rotz",
+                                       "jLeftWrist_rotx", "jLeftWrist_roty", "jLeftWrist_rotz" };
+
     iDynTree::ModelLoader modelLoader;
-    if (!modelLoader.loadModelFromFile(urdfFilePath) || !modelLoader.isValid()) {
+    if (!modelLoader.loadReducedModelFromFile(urdfFilePath, jointList) || !modelLoader.isValid()) {
         yError() << LogPrefix << "Failed to load model" << urdfFilePath;
         return false;
     }
@@ -816,6 +900,10 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
         std::unique_ptr<iDynTree::KinDynComputations>(new iDynTree::KinDynComputations());
     pImpl->kinDynComputations->loadRobotModel(modelLoader.model());
     pImpl->kinDynComputations->setFloatingBase(pImpl->floatingBaseFrame);
+
+    pImpl->extKinDyn = std::make_shared<iDynTree::KinDynComputations>();
+    pImpl->extKinDyn->loadRobotModel(modelLoader.model());
+    pImpl->extKinDyn->setFloatingBase(pImpl->floatingBaseFrame);
 
     // Initialize World Secondary Calibration
     pImpl->secondaryCalibrationWorld = iDynTree::Transform::Identity();
@@ -1095,6 +1183,23 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
         }
     }
 
+    if (!pImpl->setupJointVelLowPassFilter(config)) {
+        return false;
+    }
+
+    // ==================================
+    // INITIALIZE EXTERNAL BASE ESTIMATOR
+    // ==================================
+
+    if (pImpl->baseState == BaseState::external) {
+        if (!pImpl->setupExternalBaseEstimator(config)) {
+            return false;
+        }
+        if (!pImpl->setupExternalContactDetector(config)) {
+            return false;
+        }
+    }
+
     // ===================
     // INITIALIZE RPC PORT
     // ===================
@@ -1114,6 +1219,83 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
 
     // Set rpc port reader
     pImpl->rpcPort.setReader(*pImpl->commandPro);
+
+    return true;
+}
+
+bool HumanStateProvider::impl::setupJointVelLowPassFilter(yarp::os::Searchable& config)
+{
+    if (!(config.check("useJointVelLowPassFilter") && config.find("useJointVelLowPassFilter").isBool())) {
+        useJointVelLowPassFilter = false;
+    }
+    else {
+        useJointVelLowPassFilter = config.find("useJointVelLowPassFilter").asBool();
+    }
+    if (useJointVelLowPassFilter)
+    {
+        if (!(config.check("jointVelLowPassFilterCutOffFreq") && config.find("jointVelLowPassFilterCutOffFreq").isDouble())) {
+            yError() << LogPrefix
+                     << "jointVelLowPassFilterCutOffFreq option not found or not valid";
+            return false;
+        }
+
+        jointVelFiltCutoffFreq = config.find("jointVelLowPassFilterCutOffFreq").asDouble();
+        jointVelFiltSamplingPeriod = period;
+        jointVelLowPassFilter = std::make_unique<iCub::ctrl::FirstOrderLowPassFilter>(jointVelFiltCutoffFreq, jointVelFiltSamplingPeriod);
+        yInfo() << LogPrefix << "*** Joint velocity low pass filter cut off frequency     :"
+                << jointVelFiltCutoffFreq;
+        yInfo() << LogPrefix << "*** Joint velocity low pass filter sampling period     :"
+                << jointVelFiltSamplingPeriod;
+    }
+
+    return true;
+}
+
+bool HumanStateProvider::impl::setupExternalBaseEstimator(yarp::os::Searchable& config)
+{
+    extLeggedOdom = std::make_unique<BipedalLocomotion::Estimators::LeggedOdometry>();
+
+    auto originalHandler = std::make_shared<BipedalLocomotion::ParametersHandler::YarpImplementation>();
+    originalHandler->set(config);
+    BipedalLocomotion::ParametersHandler::IParametersHandler::shared_ptr parameterHandler = originalHandler;
+    // set required parameter for base estimator
+    parameterHandler->setParameter("sampling_period_in_s", period);
+
+    if (!extLeggedOdom->initialize(parameterHandler, extKinDyn)) {
+        yError() << LogPrefix << "Could not configure external base estimator - LeggedOdometry.";
+        return false;
+    }
+
+    yInfo() << LogPrefix << "Configured external base estimator - LeggedOdometry - successfully.";
+    return true;
+}
+
+bool HumanStateProvider::impl::setupExternalContactDetector(yarp::os::Searchable& config)
+{
+    auto originalHandler = std::make_shared<BipedalLocomotion::ParametersHandler::YarpImplementation>();
+    originalHandler->set(config);
+    BipedalLocomotion::ParametersHandler::IParametersHandler::shared_ptr parameterHandler = originalHandler;
+    bool ok{true};
+
+    extSchmitt = std::make_unique<BipedalLocomotion::Contacts::SchmittTriggerDetector>();
+    yarp::os::Bottle& schmittGroup = config.findGroup("SchmittTriggerParams");
+    if (schmittGroup.isNull())
+    {
+        yError() << LogPrefix << "Could not configure external contact detector - schmitt trigger.";
+        return false;
+    }
+
+    auto originalSchmittHandler = std::make_shared<BipedalLocomotion::ParametersHandler::YarpImplementation>();
+    originalSchmittHandler->set(schmittGroup);
+    BipedalLocomotion::ParametersHandler::IParametersHandler::shared_ptr parameterSchmittHandler = originalSchmittHandler;
+
+    if (!extSchmitt->initialize(parameterSchmittHandler))
+    {
+        return false;
+    }
+
+    extSchmitt->resetState(leftFootString, true);
+    extSchmitt->resetState(rightFootString, true);
 
     return true;
 }
@@ -1155,6 +1337,59 @@ void HumanStateProvider::run()
         }
     }
 
+    // if human-wrench provider is attached, retrieve the links wrenches
+    if (pImpl->iHumanWrench)
+    {
+        // wait for the first wrench data to arrive
+        std::vector<double> wrenchValues = pImpl->iHumanWrench->getWrenches();
+        for (size_t wrenchSourcesIdx = 0; wrenchSourcesIdx < pImpl->iHumanWrench->getNumberOfWrenchSources(); wrenchSourcesIdx++)
+        {
+            Eigen::Vector3d force, torque;
+            force << pImpl->iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx),
+                     pImpl->iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+1),
+                     pImpl->iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+2);
+            torque << pImpl->iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+3),
+                     pImpl->iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+4),
+                     pImpl->iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+5);
+            double norm{force.norm()};
+
+            if (pImpl->iHumanWrench->getWrenchSourceNames().at(wrenchSourcesIdx) == "FTShoeLeft")
+            {
+                Eigen::Matrix3d Rw = iDynTree::toEigen(pImpl->kinDynComputations->getWorldTransform(pImpl->leftFootString).getRotation());
+                Eigen::Vector3d f = Rw.transpose()*force;
+                pImpl->extSchmitt->setTimedTriggerInput(pImpl->leftFootString, yarp::os::Time::now(),
+                                                        f(2));
+
+                if (pImpl->m_extEstimatorInitialized)
+                {
+                    auto size = pImpl->lfForce.size();
+                    pImpl->lfForce.conservativeResize(size+1);
+                    pImpl->lfForce(size) = f(2);
+                    pImpl->lfWrench.conservativeResize(size+1, 6);
+                    pImpl->lfWrench.row(size) << force, torque;
+
+                }
+            }
+
+            if (pImpl->iHumanWrench->getWrenchSourceNames().at(wrenchSourcesIdx) == "FTShoeRight")
+            {
+                Eigen::Matrix3d Rw = iDynTree::toEigen(pImpl->kinDynComputations->getWorldTransform(pImpl->rightFootString).getRotation());
+                Eigen::Vector3d f = Rw.transpose()*force;
+                pImpl->extSchmitt->setTimedTriggerInput(pImpl->rightFootString, yarp::os::Time::now(),
+                                                        f(2));
+
+                if (pImpl->m_extEstimatorInitialized)
+                {
+                    auto size = pImpl->rfForce.size();
+                    pImpl->rfForce.conservativeResize(size+1);
+                    pImpl->rfForce(size) = f(2);
+                    pImpl->rfWrench.conservativeResize(size+1, 6);
+                    pImpl->rfWrench.row(size) << force, torque;
+                }
+            }
+        }
+    }
+
     // Solve Inverse Kinematics and Inverse Velocity Problems
     auto tick = std::chrono::high_resolution_clock::now();
     bool inverseKinematicsFailure;
@@ -1185,16 +1420,26 @@ void HumanStateProvider::run()
     yDebug() << LogPrefix << "IK took"
              << std::chrono::duration_cast<std::chrono::milliseconds>(tock - tick).count() << "ms";
 
+    // updates the filtered velocities in a separate buffer
+    pImpl->lowPassFilterJointVelocities();
+
     // If useDirectBaseMeasurement is true, directly use the measured base pose and velocity. If useFixedBase is also enabled,
     // identity transform and zero velocity will be used.
     if (pImpl->useFixedBase) {
         pImpl->baseTransformSolution = iDynTree::Transform::Identity();
         pImpl->baseVelocitySolution.zero();
     }
-    else if (pImpl->useDirectBaseMeasurement) {
-        pImpl->baseTransformSolution = pImpl->linkTransformMatrices.at(pImpl->floatingBaseFrame);
+    else  if (pImpl->useDirectBaseMeasurement) {
+        pImpl->baseTransformSolution = pImpl->linkTransformMatricesRaw.at(pImpl->floatingBaseFrame);
         pImpl->baseVelocitySolution = pImpl->linkVelocities.at(pImpl->floatingBaseFrame);
     }
+
+//     if (pImpl->baseState == BaseState::external) {
+        bool baseEstimationFailure = !pImpl->updateExternalEstimatorAndDetector();
+//         if (baseEstimationFailure) {
+//             yWarning() << LogPrefix << "External base estimation failed, keeping the previous solution";
+//         }
+//     }
 
     // CoM position and velocity
     std::array<double, 3> CoM_position, CoM_velocity;
@@ -1266,6 +1511,28 @@ void HumanStateProvider::run()
     //                                          pImpl->baseVelocitySolution,
     //                                          pImpl->linkErrorAngularVelocities);
 }
+
+void HumanStateProvider::impl::lowPassFilterJointVelocities()
+{
+    if (useJointVelLowPassFilter) {
+        if (!jointVelFiltInitialized) {
+            yarp::sig::Vector initVel(jointVelocitiesSolution.size());
+            iDynTree::toYarp(jointVelocitiesSolution, initVel);
+            jointVelLowPassFilter->init(initVel);
+            jointVelFiltInitialized = true;
+        }
+        else {
+            yarp::sig::Vector unfiltVel(jointVelocitiesSolution.size());
+            iDynTree::toYarp(jointVelocitiesSolution, unfiltVel);
+            const yarp::sig::Vector& filtVel = jointVelLowPassFilter->filt(unfiltVel);
+            iDynTree::toiDynTree(filtVel, jointVelocitiesSolutionFiltered);
+        }
+    }
+    else {
+        jointVelocitiesSolutionFiltered = jointVelocitiesSolution;
+    }
+}
+
 
 void HumanStateProvider::impl::eraseSecondaryCalibration(const std::string& linkName)
 {
@@ -1370,6 +1637,276 @@ void HumanStateProvider::impl::computeSecondaryCalibrationRotationsForChain(cons
         secondaryCalibrationWorld = refLinkForCalibrationTransform * linkForCalibrationTransform.inverse();
         yInfo() << LogPrefix << "secondary calibration for the World is set";
     }
+}
+
+bool HumanStateProvider::impl::updateExternalEstimatorAndDetector()
+{
+    if (!extSchmitt->advance()) {
+        yError() << LogPrefix << "Could not update the Schmitt trigger detector" ;
+    }
+
+    if (useJointVelLowPassFilter)
+    {
+        if (!extLeggedOdom->setKinematics(iDynTree::toEigen(jointConfigurationSolution),
+                                      iDynTree::toEigen(jointVelocitiesSolutionFiltered)))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        if (!extLeggedOdom->setKinematics(iDynTree::toEigen(jointConfigurationSolution),
+                                        iDynTree::toEigen(jointVelocitiesSolution)))
+        {
+            return false;
+        }
+    }
+
+    if (itrCount < initThresh)
+    {
+        if (itrCount == initThresh-1)
+        {
+            if (!initializeEstimatorWorld())
+            {
+                yError() << LogPrefix << "Could not initialize estimator world." ;
+                return false;
+            }
+
+            // need to advance the estimator to update the states
+            if (!extLeggedOdom->advance()) {
+                yError() << LogPrefix << "Could not advance the external base estimator after initialization." ;
+                //return false;
+            }
+
+            // use the updated states to get the ground plane information
+            // assuming that the link with fixed frame is in flat surface contact with the ground plane
+            auto fixedFrameIdx = extLeggedOdom->getFixedFrameIdx();
+            auto w_H_f0 = extLeggedOdom->modelComputations().kinDyn()->getWorldTransform(fixedFrameIdx);
+            flatContactPlaneInclinationRoll =  w_H_f0.getRotation().asRPY()(0);
+            flatContactPlaneInclinationPitch =  w_H_f0.getRotation().asRPY()(1);
+            flatContactPlaneHeight = w_H_f0.getPosition()(2);
+        }
+        itrCount++;
+        return true;
+    }
+
+    BipedalLocomotion::Contacts::EstimatedContactList contactMap;
+    contactMap = extSchmitt->getOutput();
+    for ( auto& [name, contact] : contactMap )
+    {
+        extLeggedOdom->setContactStatus(name, contact.isActive, contact.switchTime);
+
+        if (name == leftFootString) {
+            auto size = lfContact.size();
+            lfContact.conservativeResize(size+1);
+            lfTime.conservativeResize(size+1);
+            lfContact(size) = static_cast<int>(contact.isActive);
+            lfTime(size) = contact.lastUpdateTime;
+            yInfo() << "LF Contact: " << static_cast<int>(contact.isActive);
+        }
+
+        if (name == rightFootString) {
+            auto size = rfContact.size();
+            rfContact.conservativeResize(size+1);
+            rfTime.conservativeResize(size+1);
+            rfContact(size) = static_cast<int>(contact.isActive);
+            rfTime(size) = contact.lastUpdateTime;
+            yInfo() << "RF Contact: " << static_cast<int>(contact.isActive);
+        }
+    }
+
+    if (!extLeggedOdom->advance()) {
+        yError() << LogPrefix << "Could not update the external base estimator" ;
+        //return false;
+    }
+
+    // reset fixed frame pose using contact plane
+    auto currentFixedFrame = extLeggedOdom->getFixedFrameIdx();
+
+    yInfo() << "------===================================>" << flatContactPlaneHeight;
+    auto worldFpose = extLeggedOdom->getFixedFramePose();
+    Eigen::Vector3d worldFpos = worldFpose.translation();
+    worldFpos(2) = flatContactPlaneHeight;
+    worldFpose.translation(worldFpos);
+    iDynTree::Rotation w_R_f;
+    iDynTree::toEigen(w_R_f) = worldFpose.rotation();
+    w_R_f = iDynTree::Rotation::RPY(flatContactPlaneInclinationRoll,
+                                    flatContactPlaneInclinationPitch,
+                                    w_R_f.asRPY()(2));
+
+    Eigen::Quaterniond quatF = Eigen::Quaterniond(w_R_f.asQuaternion()(0),
+                                                  w_R_f.asQuaternion()(1),
+                                                  w_R_f.asQuaternion()(2),
+                                                  w_R_f.asQuaternion()(3));
+
+    extLeggedOdom->changeFixedFrame(currentFixedFrame,
+                                    quatF,
+                                    worldFpos);
+
+    auto out = extLeggedOdom->getOutput();
+
+    iDynTree::Vector3 linV, angV;
+    iDynTree::toEigen(linV) = out.baseTwist.head<3>();
+    iDynTree::toEigen(angV) = out.baseTwist.tail<3>();
+    baseVelocitySolution.setLinearVec3(linV);
+    baseVelocitySolution.setAngularVec3(angV);
+
+    iDynTree::Matrix4x4 pose;
+    iDynTree::toEigen(pose) = out.basePose.transform();
+//     iDynTree::toEigen(pose).block<3, 3>(0, 0) = iDynTree::toEigen(linkTransformMatricesRaw.at("Pelvis").getRotation());
+    baseTransformSolution.fromHomogeneousTransform(pose);
+
+    auto pEst = baseTransformSolution.getPosition();
+    auto rpyEst = baseTransformSolution.getRotation().asRPY();
+    auto estSize = estTime.rows();
+    estTime.conservativeResize(estSize+1);
+    extPos.conservativeResize(estSize+1, 3);
+    extRot.conservativeResize(estSize+1, 3);
+    extLinVel.conservativeResize(estSize+1, 3);
+    extAngVel.conservativeResize(estSize+1, 3);
+    extPos.row(estSize) << pEst(0), pEst(1), pEst(2);
+    extRot.row(estSize) << rpyEst(0), rpyEst(1), rpyEst(2);
+    extLinVel.row(estSize) << out.baseTwist(0), out.baseTwist(1), out.baseTwist(2);
+    extAngVel.row(estSize) << out.baseTwist(3), out.baseTwist(4), out.baseTwist(5);
+
+    auto w_H_b = linkTransformMatricesRaw.at("Pelvis");
+
+    auto pOut = linkTransformMatricesRaw.at("Pelvis").getPosition();
+    auto rpyOut = linkTransformMatricesRaw.at("Pelvis").getRotation().asRPY();
+    auto baseTwist = linkVelocities.at("Pelvis");
+    linkPos.conservativeResize(estSize+1, 3);
+    linkRot.conservativeResize(estSize+1, 3);
+    linkLinVel.conservativeResize(estSize+1, 3);
+    linkAngVel.conservativeResize(estSize+1, 3);
+    linkPos.row(estSize) << pOut(0), pOut(1), pOut(2);
+    linkRot.row(estSize) << rpyOut(0), rpyOut(1), rpyOut(2);
+    linkLinVel.row(estSize) << baseTwist(0), baseTwist(1), baseTwist(2);
+    linkAngVel.row(estSize) << baseTwist(3), baseTwist(4), baseTwist(5);
+
+    outjointPos.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
+    outjointVel.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
+    outjointVelFilt.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
+    for (int isx =0; isx < kinDynComputations->getNrOfDegreesOfFreedom(); isx++)
+    {
+        outjointPos(estSize, isx) = jointConfigurationSolution(isx);
+        outjointVel(estSize, isx) = jointVelocitiesSolution(isx);
+        outjointVelFilt(estSize, isx) = jointVelocitiesSolutionFiltered(isx);
+    }
+
+    fixedFrame.conservativeResize(estSize+1);
+    fixedFrame(estSize) = currentFixedFrame;
+
+    return true;
+}
+
+bool HumanStateProvider::impl::initializeEstimatorWorld()
+{
+    if (!m_extEstimatorInitialized)
+    {
+        auto b_H_w =  linkTransformMatricesRaw.at("Pelvis").inverse(); //baseTransformSolution
+
+        auto quat = b_H_w.getRotation().asQuaternion();
+        if (!extLeggedOdom->resetEstimator("Pelvis",
+                                           Eigen::Quaterniond(quat(0), quat(1), quat(2), quat(3)),
+                                           iDynTree::toEigen(b_H_w.getPosition())))
+        {
+            return false;
+        }
+
+        m_extEstimatorInitialized = true;
+    }
+
+    return true;
+}
+
+bool HumanStateProvider::impl::logData()
+{
+    matioCpp::File file = matioCpp::File::Create("out-HDE-matiocpp.mat");
+    matioCpp::MultiDimensionalArray<double> outEstPos{"estBasePos",
+                                                      {static_cast<std::size_t>(extPos.rows()), static_cast<std::size_t>(extPos.cols())},
+                                                      extPos.data()};
+    matioCpp::MultiDimensionalArray<double> outEstRot{"estBaseRot",
+                                                      {static_cast<std::size_t>(extRot.rows()), static_cast<std::size_t>(extRot.cols())},
+                                                      extRot.data()};
+    matioCpp::MultiDimensionalArray<double> outLinkPos{"linkBasePos",
+                                                      {static_cast<std::size_t>(linkPos.rows()), static_cast<std::size_t>(linkPos.cols())},
+                                                      linkPos.data()};
+    matioCpp::MultiDimensionalArray<double> outLinkRot{"linkBaseRot",
+                                                      {static_cast<std::size_t>(linkRot.rows()), static_cast<std::size_t>(linkRot.cols())},
+                                                      linkRot.data()};
+    matioCpp::MultiDimensionalArray<double> outEstLinVel{"estBaseLinVel",
+                                                      {static_cast<std::size_t>(extLinVel.rows()), static_cast<std::size_t>(extLinVel.cols())},
+                                                      extLinVel.data()};
+    matioCpp::MultiDimensionalArray<double> outEstAngVel{"estBaseAngVel",
+                                                      {static_cast<std::size_t>(extAngVel.rows()), static_cast<std::size_t>(extAngVel.cols())},
+                                                      extAngVel.data()};
+    matioCpp::MultiDimensionalArray<double> outLinkLinVel{"linkBaseLinVel",
+                                                      {static_cast<std::size_t>(linkLinVel.rows()), static_cast<std::size_t>(linkLinVel.cols())},
+                                                      linkLinVel.data()};
+    matioCpp::MultiDimensionalArray<double> outLinkAngVel{"linkBaseAngVel",
+                                                      {static_cast<std::size_t>(linkAngVel.rows()), static_cast<std::size_t>(linkAngVel.cols())},
+                                                      linkAngVel.data()};
+
+    matioCpp::MultiDimensionalArray<double> outJPos{"jPos",
+                                                      {static_cast<std::size_t>(outjointPos.rows()), static_cast<std::size_t>(outjointPos.cols())},
+                                                      outjointPos.data()};
+    matioCpp::MultiDimensionalArray<double> outJVel{"jVel",
+                                                      {static_cast<std::size_t>(outjointVel.rows()), static_cast<std::size_t>(outjointVel.cols())},
+                                                      outjointVel.data()};
+    matioCpp::MultiDimensionalArray<double> outJVelFilt{"jVelFilt",
+                                                      {static_cast<std::size_t>(outjointVelFilt.rows()), static_cast<std::size_t>(outjointVelFilt.cols())},
+                                                      outjointVelFilt.data()};
+
+    matioCpp::MultiDimensionalArray<double> outlfWrench{"lfWrench",
+                                                      {static_cast<std::size_t>(lfWrench.rows()), static_cast<std::size_t>(lfWrench.cols())},
+                                                      lfWrench.data()};
+    matioCpp::MultiDimensionalArray<double> outrfWrench{"rfWrench",
+                                                      {static_cast<std::size_t>(rfWrench.rows()), static_cast<std::size_t>(rfWrench.cols())},
+                                                      rfWrench.data()};
+
+    auto outContactlf = BipedalLocomotion::Conversions::tomatioCpp(lfContact, "estLFContact");
+    auto outContactrf = BipedalLocomotion::Conversions::tomatioCpp(rfContact, "estRFContact");
+    auto outlfForceZ = BipedalLocomotion::Conversions::tomatioCpp(lfForce, "LFForceZ");
+    auto outrfForceZ = BipedalLocomotion::Conversions::tomatioCpp(rfForce, "RFForceZ");
+    auto outContactlfTime = BipedalLocomotion::Conversions::tomatioCpp(lfTime, "estLFContactTime");
+    auto outContactrfTime = BipedalLocomotion::Conversions::tomatioCpp(rfTime, "estRFContactTime");
+
+
+    auto outBaseTime = BipedalLocomotion::Conversions::tomatioCpp(estTime, "estBaseTime");
+    auto outFixedFrame = BipedalLocomotion::Conversions::tomatioCpp(fixedFrame, "estFixedFrame");
+
+
+    bool write_ok{true};
+
+    write_ok = write_ok && file.write(outEstPos);
+    write_ok = write_ok && file.write(outEstRot);
+    write_ok = write_ok && file.write(outLinkPos);
+    write_ok = write_ok && file.write(outLinkRot);
+    write_ok = write_ok && file.write(outEstLinVel);
+    write_ok = write_ok && file.write(outEstAngVel);
+    write_ok = write_ok && file.write(outLinkLinVel);
+    write_ok = write_ok && file.write(outLinkAngVel);
+    write_ok = write_ok && file.write(outBaseTime);
+
+    write_ok = write_ok && file.write(outlfForceZ);
+    write_ok = write_ok && file.write(outrfForceZ);
+    write_ok = write_ok && file.write(outContactrf);
+    write_ok = write_ok && file.write(outContactlf);
+    write_ok = write_ok && file.write(outContactlfTime);
+    write_ok = write_ok && file.write(outContactrfTime);
+
+    write_ok = write_ok && file.write(outJPos);
+    write_ok = write_ok && file.write(outJVel);
+    write_ok = write_ok && file.write(outJVelFilt);
+    write_ok = write_ok && file.write(outFixedFrame);
+
+    if (!write_ok)
+    {
+        yError() << LogPrefix << "Could not write to file." ;
+        return false;
+    }
+
+    return true;
 }
 
 bool HumanStateProvider::impl::applyRpcCommand()
@@ -1514,7 +2051,7 @@ bool HumanStateProvider::impl::getLinkTransformFromInputData(
 
         iDynTree::Position pos(position.at(0), position.at(1), position.at(2));
 
-        Quaternion orientation;
+        wearable::Quaternion orientation;
         if (!sensor->getLinkOrientation(orientation)) {
             yError() << LogPrefix << "Failed to read link orientation from virtual link sensor";
             return false;
@@ -2086,8 +2623,14 @@ bool HumanStateProvider::impl::solveIntegrationBasedInverseKinematics()
     iDynTree::KinDynComputations* computations = kinDynComputations.get();
 
     if (useDirectBaseMeasurement) {
-        computations->setRobotState(
-            jointConfigurationSolution, jointVelocitiesSolution, worldGravity);
+//         computations->setRobotState(jointConfigurationSolution,
+//                                     jointVelocitiesSolution,
+//                                     worldGravity);
+        computations->setRobotState(baseTransformSolution,
+                                    jointConfigurationSolution,
+                                    linkVelocities["Pelvis"],
+                                    jointVelocitiesSolution,
+                                    worldGravity);
     }
     else {
         computations->setRobotState(baseTransformSolution,
@@ -2132,6 +2675,7 @@ bool HumanStateProvider::impl::solveIntegrationBasedInverseKinematics()
             linearVelocityError =
                 computations->getWorldTransform(humanModel.getFrameIndex(linkName)).getPosition()
                 - linkTransformMatrices[linkName].getPosition();
+
             iDynTree::toEigen(integralLinearVelocityError) =
                 iDynTree::toEigen(integralLinearVelocityError)
                 + iDynTree::toEigen(linearVelocityError) * dt;
@@ -2154,6 +2698,11 @@ bool HumanStateProvider::impl::solveIntegrationBasedInverseKinematics()
                     - integrationBasedIKAngularCorrectionGain * angularVelocityError.getVal(i - 3)
                     - integrationBasedIKIntegralAngularCorrectionGain
                           * integralOrientationError.getVal(i - 3));
+        }
+
+        if (linkName == floatingBaseFrame && m_extEstimatorInitialized)
+        {
+            linkVelocities[linkName] = baseVelocitySolution;
         }
     }
 
@@ -2195,19 +2744,39 @@ bool HumanStateProvider::impl::solveIntegrationBasedInverseKinematics()
         }
     }
 
+    lowPassFilterJointVelocities();
+
     // VELOCITY INTEGRATION
     // integrate velocities measurements
     if (!useDirectBaseMeasurement) {
-        stateIntegrator.integrate(jointVelocitiesSolution,
-                                  baseVelocitySolution.getLinearVec3(),
-                                  baseVelocitySolution.getAngularVec3(),
-                                  dt);
+
+        if (useJointVelLowPassFilter)
+        {
+            stateIntegrator.integrate(jointVelocitiesSolutionFiltered,
+                                      baseVelocitySolution.getLinearVec3(),
+                                      baseVelocitySolution.getAngularVec3(),
+                                      dt);
+        }
+        else
+        {
+            stateIntegrator.integrate(jointVelocitiesSolution,
+                                      baseVelocitySolution.getLinearVec3(),
+                                      baseVelocitySolution.getAngularVec3(),
+                                      dt);
+        }
 
         stateIntegrator.getJointConfiguration(jointConfigurationSolution);
         stateIntegrator.getBasePose(baseTransformSolution);
     }
     else {
-        stateIntegrator.integrate(jointVelocitiesSolution, dt);
+        if (useJointVelLowPassFilter)
+        {
+            stateIntegrator.integrate(jointVelocitiesSolution, dt);
+        }
+        else
+        {
+            stateIntegrator.integrate(jointVelocitiesSolutionFiltered, dt);
+        }
 
         stateIntegrator.getJointConfiguration(jointConfigurationSolution);
     }
@@ -2429,109 +2998,132 @@ bool HumanStateProvider::attach(yarp::dev::PolyDriver* poly)
         return false;
     }
 
-    if (pImpl->iWear || !poly->view(pImpl->iWear) || !pImpl->iWear) {
-        yError() << LogPrefix << "Failed to view the IWear interface from the PolyDriver";
-        return false;
-    }
+    // Get the device name from the driver
+    const std::string deviceName = poly->getValue("device").asString();
+    std::cerr << "attaching " << deviceName << std::endl;
 
-    while (pImpl->iWear->getStatus() == WearStatus::WaitingForFirstRead) {
-        yInfo() << LogPrefix << "IWear interface waiting for first data. Waiting...";
-        yarp::os::Time::delay(5);
-    }
+    if (deviceName == "iwear_remapper") {
 
-    if (pImpl->iWear->getStatus() != WearStatus::Ok) {
-        yError() << LogPrefix << "The status of the attached IWear interface is not ok ("
-                 << static_cast<int>(pImpl->iWear->getStatus()) << ")";
-        return false;
-    }
-
-    // ===========
-    // CHECK LINKS
-    // ===========
-
-    // Check that the attached IWear interface contains all the model links
-    for (size_t linkIndex = 0; linkIndex < pImpl->humanModel.getNrOfLinks(); ++linkIndex) {
-        // Get the name of the link from the model and its prefix from iWear
-        std::string modelLinkName = pImpl->humanModel.getLinkName(linkIndex);
-
-        if (pImpl->wearableStorage.modelToWearable_LinkName.find(modelLinkName)
-            == pImpl->wearableStorage.modelToWearable_LinkName.end()) {
-            // yWarning() << LogPrefix << "Failed to find" << modelLinkName
-            //           << "entry in the configuration map. Skipping this link.";
-            continue;
-        }
-
-        // Get the name of the sensor associated to the link
-        std::string wearableLinkName =
-            pImpl->wearableStorage.modelToWearable_LinkName.at(modelLinkName);
-
-        // Try to get the sensor
-        auto sensor = pImpl->iWear->getVirtualLinkKinSensor(wearableLinkName);
-        if (!sensor) {
-            // yError() << LogPrefix << "Failed to find sensor associated to link" <<
-            // wearableLinkName
-            //<< "from the IWear interface";
+        if (pImpl->iWear || !poly->view(pImpl->iWear) || !pImpl->iWear) {
+            yError() << LogPrefix << "Failed to view the IWear interface from the PolyDriver";
             return false;
         }
 
-        // Create a sensor map entry using the wearable sensor name as key
-        pImpl->wearableStorage.linkSensorsMap[wearableLinkName] =
-            pImpl->iWear->getVirtualLinkKinSensor(wearableLinkName);
-    }
+        while (pImpl->iWear->getStatus() == WearStatus::WaitingForFirstRead) {
+            yInfo() << LogPrefix << "IWear interface waiting for first data. Waiting...";
+            yarp::os::Time::delay(5);
+        }
 
-    // ============
-    // CHECK JOINTS
-    // ============
+        if (pImpl->iWear->getStatus() != WearStatus::Ok) {
+            yError() << LogPrefix << "The status of the attached IWear interface is not ok ("
+                    << static_cast<int>(pImpl->iWear->getStatus()) << ")";
+            return false;
+        }
 
-    if (pImpl->useXsensJointsAngles) {
-        yDebug() << "Checking joints";
+        // ===========
+        // CHECK LINKS
+        // ===========
 
-        for (size_t jointIndex = 0; jointIndex < pImpl->humanModel.getNrOfDOFs(); ++jointIndex) {
-            // Get the name of the joint from the model and its prefix from iWear
-            std::string modelJointName = pImpl->humanModel.getJointName(jointIndex);
+        // Check that the attached IWear interface contains all the model links
+        for (size_t linkIndex = 0; linkIndex < pImpl->humanModel.getNrOfLinks(); ++linkIndex) {
+            // Get the name of the link from the model and its prefix from iWear
+            std::string modelLinkName = pImpl->humanModel.getLinkName(linkIndex);
 
-            // Urdfs don't have support of spherical joints, IWear instead does.
-            // We use the configuration for addressing this mismatch.
-            if (pImpl->wearableStorage.modelToWearable_JointInfo.find(modelJointName)
-                == pImpl->wearableStorage.modelToWearable_JointInfo.end()) {
-                yWarning() << LogPrefix << "Failed to find" << modelJointName
-                           << "entry in the configuration map. Skipping this joint.";
+            if (pImpl->wearableStorage.modelToWearable_LinkName.find(modelLinkName)
+                == pImpl->wearableStorage.modelToWearable_LinkName.end()) {
+                // yWarning() << LogPrefix << "Failed to find" << modelLinkName
+                //           << "entry in the configuration map. Skipping this link.";
                 continue;
             }
 
-            // Get the name of the sensor associate to the joint
-            std::string wearableJointName =
-                pImpl->wearableStorage.modelToWearable_JointInfo.at(modelJointName).name;
+            // Get the name of the sensor associated to the link
+            std::string wearableLinkName =
+                pImpl->wearableStorage.modelToWearable_LinkName.at(modelLinkName);
 
             // Try to get the sensor
-            auto sensor = pImpl->iWear->getVirtualSphericalJointKinSensor(wearableJointName);
+            auto sensor = pImpl->iWear->getVirtualLinkKinSensor(wearableLinkName);
             if (!sensor) {
-                yError() << LogPrefix << "Failed to find sensor associated with joint"
-                         << wearableJointName << "from the IWear interface";
+                // yError() << LogPrefix << "Failed to find sensor associated to link" <<
+                // wearableLinkName
+                //<< "from the IWear interface";
                 return false;
             }
 
             // Create a sensor map entry using the wearable sensor name as key
-            pImpl->wearableStorage.jointSensorsMap[wearableJointName] = sensor;
+            pImpl->wearableStorage.linkSensorsMap[wearableLinkName] =
+                pImpl->iWear->getVirtualLinkKinSensor(wearableLinkName);
+        }
+
+        // ============
+        // CHECK JOINTS
+        // ============
+
+        if (pImpl->useXsensJointsAngles) {
+            yDebug() << "Checking joints";
+
+            for (size_t jointIndex = 0; jointIndex < pImpl->humanModel.getNrOfDOFs(); ++jointIndex) {
+                // Get the name of the joint from the model and its prefix from iWear
+                std::string modelJointName = pImpl->humanModel.getJointName(jointIndex);
+
+                // Urdfs don't have support of spherical joints, IWear instead does.
+                // We use the configuration for addressing this mismatch.
+                if (pImpl->wearableStorage.modelToWearable_JointInfo.find(modelJointName)
+                    == pImpl->wearableStorage.modelToWearable_JointInfo.end()) {
+                    yWarning() << LogPrefix << "Failed to find" << modelJointName
+                            << "entry in the configuration map. Skipping this joint.";
+                    continue;
+                }
+
+                // Get the name of the sensor associate to the joint
+                std::string wearableJointName =
+                    pImpl->wearableStorage.modelToWearable_JointInfo.at(modelJointName).name;
+
+                // Try to get the sensor
+                auto sensor = pImpl->iWear->getVirtualSphericalJointKinSensor(wearableJointName);
+                if (!sensor) {
+                    yError() << LogPrefix << "Failed to find sensor associated with joint"
+                            << wearableJointName << "from the IWear interface";
+                    return false;
+                }
+
+                // Create a sensor map entry using the wearable sensor name as key
+                pImpl->wearableStorage.jointSensorsMap[wearableJointName] = sensor;
+            }
         }
     }
 
-    // ====
-    // MISC
-    // ====
+    if (deviceName == "human_wrench_provider") {
+        // Attach IHumanWrench interfaces coming from HumanWrenchProvider
+        if (pImpl->iHumanWrench || !poly->view(pImpl->iHumanWrench) || !pImpl->iHumanWrench) {
+            yError() << LogPrefix << "Failed to view iHumanWrench interface from the polydriver";
+            return false;
+        }
 
-    // Start the PeriodicThread loop
-    if (!start()) {
-        yError() << LogPrefix << "Failed to start the loop.";
-        return false;
+        // Check the interface
+        if (pImpl->iHumanWrench->getNumberOfWrenchSources() == 0
+                || pImpl->iHumanWrench->getNumberOfWrenchSources() != pImpl->iHumanWrench->getWrenchSourceNames().size()) {
+            yError() << "The IHumanWrench interface might not be ready";
+            return false;
+        }
+
+        // wait for first data
+        while (pImpl->iHumanWrench->getWrenches().size() != (pImpl->iHumanWrench->getNumberOfWrenchSources() * 6) ) {
+            yInfo() << LogPrefix << "IHumanWrench interface waiting for first data. Waiting...";
+            yarp::os::Time::delay(5);
+        }
+
+        yInfo() << LogPrefix << deviceName << "human_wrench_provider attach() successful";
     }
 
-    yInfo() << LogPrefix << "attach() successful";
     return true;
 }
 
 void HumanStateProvider::threadRelease()
 {
+    if (!pImpl->logData()) {
+        yError() << LogPrefix << "Failed to log data";
+    }
+
     if (!pImpl->ikPool->closeIKWorkerPool()) {
         yError() << LogPrefix << "Failed to close the IKWorker pool";
     }
@@ -2549,6 +3141,7 @@ bool HumanStateProvider::detach()
     }
 
     pImpl->iWear = nullptr;
+    pImpl->iHumanWrench = nullptr;
     return true;
 }
 
@@ -2559,19 +3152,34 @@ bool HumanStateProvider::detachAll()
 
 bool HumanStateProvider::attachAll(const yarp::dev::PolyDriverList& driverList)
 {
-    if (driverList.size() > 1) {
-        yError() << LogPrefix << "This wrapper accepts only one attached PolyDriver";
+    if (driverList.size() > 2) {
+        yError() << LogPrefix << "This wrapper accepts maximum two attached PolyDriver";
         return false;
     }
 
-    const yarp::dev::PolyDriverDescriptor* driver = driverList[0];
+    bool attachStatus = true;
 
-    if (!driver) {
-        yError() << LogPrefix << "Passed PolyDriverDescriptor is nullptr";
-        return false;
+    for (size_t i = 0; i < driverList.size(); i++) {
+        const yarp::dev::PolyDriverDescriptor* driver = driverList[i];
+
+        if (!driver) {
+                yError() << LogPrefix << "Passed PolyDriverDescriptor is nullptr";
+                return false;
+        }
+yInfo() << "----> attaching" << driver->key;
+            attachStatus = attachStatus && attach(driver->poly);
     }
 
-    return attach(driver->poly);
+    // Start the PeriodicThread loop
+    if (attachStatus)
+    {
+        if (!start()) {
+            yError() << LogPrefix << "Failed to start the loop.";
+            return false;
+        }
+    }
+
+    return attachStatus;
 }
 
 std::vector<std::string> HumanStateProvider::getJointNames() const

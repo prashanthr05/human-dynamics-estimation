@@ -445,7 +445,7 @@ int main(int argc, char* argv[])
 
             basePositionOld = basePosition;
         }
-        
+
         // Update the visualizer
         viz.draw();
         lastViz = std::chrono::steady_clock::now();

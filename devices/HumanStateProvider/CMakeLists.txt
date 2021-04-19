@@ -5,7 +5,10 @@
 find_package(IWear REQUIRED)
 find_package(iDynTree REQUIRED)
 find_package(OsqpEigen 0.4.0 REQUIRED)
-
+find_package(ICUB REQUIRED)
+find_package(manif REQUIRED)
+find_package(matioCpp REQUIRED)
+find_package(BipedalLocomotionFramework REQUIRED)
 
 yarp_prepare_plugin(human_state_provider
     TYPE hde::devices::HumanStateProvider
@@ -28,6 +31,7 @@ target_include_directories(HumanStateProvider PUBLIC
 
 target_link_libraries(HumanStateProvider PUBLIC
     IHumanState
+    IHumanWrench
     YARP::YARP_OS
     YARP::YARP_dev
     YARP::YARP_init
@@ -38,6 +42,11 @@ target_link_libraries(HumanStateProvider PUBLIC
     UtilityLibrary
     OsqpEigen::OsqpEigen
     osqp::osqp
+    ctrlLib
+    BipedalLocomotion::ParametersHandlerYarpImplementation
+    BipedalLocomotion::FloatingBaseEstimators
+    BipedalLocomotion::ContactDetectors
+    BipedalLocomotion::matioCppConversions
     )
 
 if(MSVC)

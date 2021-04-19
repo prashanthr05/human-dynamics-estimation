@@ -3,7 +3,7 @@
 <robot name="Human-HDE" build=0 portprefix="">
 
     <device type="iwear_remapper" name="XSenseIWearRemapper">
-        <param name="wearableDataPorts">(/XSensSuit/WearableData/data:o)</param>
+        <param name="wearableDataPorts">(/XSensSuit/WearableData/data:o /FTShoeLeft/WearableData/data:o /FTShoeRight/WearableData/data:o)</param>
         <param name="useRPC">false</param>
         <param name="wearableRPCPorts">(/XSensSuit/WearableData/metadataRpc:o)</param>
         <param name="outputPortName">/HDE/XsensIWearRemapper/data:o</param>
@@ -11,13 +11,16 @@
 
     <device type="human_state_provider" name="HumanStateProvider">
         <param name="period">0.02</param>
-        <param name="urdf">humanSubject01_66dof.urdf</param>
+        <param name="urdf">humanSubject02_66dof.urdf</param>
+<!--         <param name="urdf">humanSubject02_66dof.urdf</param> -->
         <param name="floatingBaseFrame">Pelvis</param>
         <!-- ikSolver options: pairwised, global, integrationbased -->
         <param name="ikSolver">integrationbased</param>
         <param name="useXsensJointsAngles">false</param>
         <param name="allowIKFailures">true</param>
-        <param name="useDirectBaseMeasurement">false</param>
+        <param name="useDirectBaseMeasurement">true</param>
+        <!-- baseState options: standard, direct, fixed, external -->
+        <param name="baseState">external</param>
         <!-- optimization parameters -->
         <param name="maxIterationsIK">300</param>
         <param name="ikLinearSolver">ma27</param>
@@ -144,9 +147,47 @@
            <param name="map_jLeftBallFoot_rotz">(jLeftBallFoot_rotz, XsensSuit::vSJoint::jLeftBallFoot, 2)</param>
         </group>
 
-        <action phase="startup" level="5" type="attach">
+        <param name="useJointVelLowPassFilter">false</param>
+        <param name="jointVelLowPassFilterCutOffFreq">1.25</param>
+
+        <!-- Begin BipedalLocomotionFramework components configuration -->
+        <group name="ModelInfo">
+            <param name="base_link">Pelvis</param>
+            <!-- BLF estimators are base-link IMU centric for model computations,
+                 only the outputs are transformed to base link.
+                 since it is a required parameter, we can use the same frames for both -->
+            <param name="base_link_imu">Pelvis</param>
+            <!-- These are required parameters for model configuration,
+                 eventhough they are unused by BLF LeggedOdom -->
+            <param name="left_foot_contact_frame">LeftFoot</param>
+            <param name="right_foot_contact_frame">RightFoot</param>
+        </group>
+        <group name="LeggedOdom">
+            <!-- This configuration  must be carried out internally
+                  once the kinematic calibration is performes-->
+            <param name="initial_fixed_frame">LeftFoot</param>
+            <param name="initial_ref_frame_for_world">Pelvis</param>
+            <!-- quaternion w x y z -->
+            <param name="initial_world_orientation_in_ref_frame">(1., 0., 0., 0.)</param>
+            <param name="initial_world_position_in_ref_frame">(0., 0., 0.)</param>
+            <param name="switching_pattern">latest</param>
+            <param name="vel_computation_method">multiLS</param>
+        </group>
+        <group name="SchmittTriggerParams">
+            <param name="contacts">(LeftFoot, RightFoot)</param>
+            <param name="contact_make_thresholds">(400.0, 400.0)</param>
+            <param name="contact_break_thresholds">(350.0, 350.0)</param>
+<!--            <param name="contact_make_thresholds">(250.0, 250.0)</param>
+            <param name="contact_break_thresholds">(250.0, 250.0)</param>-->
+            <param name="contact_make_switch_times">(0.02, 0.02)</param>
+            <param name="contact_break_switch_times">(0.02, 0.02)</param>
+        </group>
+        <!-- End BipedalLocomotionFramework components configuration -->
+
+        <action phase="startup" level="6" type="attach">
             <paramlist name="networks">
                 <elem name="HumanStateProviderLabel">XSenseIWearRemapper</elem>
+                <elem name="HumanDynamicsEstimatorLabel2">HumanWrenchProvider</elem>
             </paramlist>
         </action>
         <action phase="shutdown" level="5" type="detach"/>
@@ -174,6 +215,63 @@
             </paramlist>
         </action>
         <action phase="shutdown" level="5" type="detach"/>
+    </device>
+
+    <device type="human_wrench_provider" name="HumanWrenchProvider">
+        <param name="period">0.100</param>
+        <param name="human_urdf">humanSubject02_66dof.urdf</param>
+<!--         <param name="human_urdf">humanSubject02_66dof.urdf</param> -->
+        <param name="pHRIScenario">false</param>
+        <param name="number_of_sources">2</param>
+        <param name="sources">(FTShoeLeft FTShoeRight)</param>
+        <group name="FTShoeLeft">
+            <param name="sensorName">FTShoeLeftFTSensors</param>
+            <param name="outputFrame">LeftFoot</param>
+            <param name="type">fixed</param>
+            <param name="rotation">(1.0 0.0 0.0
+                                    0.0 1.0 0.0
+                                    0.0 0.0 1.0)</param>
+            <param name="position">(-0.0026 0.0 -0.1208)</param>
+        </group>
+        <group name="FTShoeRight">
+            <param name="sensorName">FTShoeRightFTSensors</param>
+            <param name="outputFrame">RightFoot</param>
+            <param name="type">fixed</param>
+            <param name="rotation">(1.0 0.0 0.0
+                                    0.0 1.0 0.0
+                                    0.0 0.0 1.0)</param>
+            <param name="position">(-0.0026 0.0 -0.1208)</param>
+        </group>
+        <action phase="startup" level="5" type="attach">
+            <paramlist name="networks">
+                 <elem name="HumanWrenchProviderLabelFTShoeLeft">XSenseIWearRemapper</elem>
+            </paramlist>
+        </action>
+        <action phase="shutdown" level="5" type="detach" />
+    </device>
+
+        <!--Wrapper to publish WrenchStamped message to Rviz-->
+    <device type="analogServer" name="HumanWrenchPublisher">
+        <param name="name">/HDE/HumanWrenchPublisher/wrench:o</param>
+        <param name="period">20</param>
+        <param name="channels">12</param>
+        <paramlist name="ports">
+            <elem name="FirstSetOfChannels">0 5 0 5</elem>
+            <elem name="SecondSetOfChannels">6 11 0 5</elem>
+        </paramlist>
+        <group name="ROS">
+            <param name="useROS">true</param>
+            <param name="ROS_topicName">(/HDE/WrenchStamped/LeftFoot /HDE/WrenchStamped/RightFoot)</param>
+            <param name="ROS_nodeName">/HDE/HumanWrenchPublisherNode</param>
+            <param name="ROS_msgType">geometry_msgs/WrenchStamped</param>
+            <param name="frame_id">(Human/LeftFoot Human/RightFoot)</param>
+        </group>
+        <action phase="startup" level="6" type="attach">
+            <paramlist name="networks">
+                <elem name="HumanWrenchPublisherLabel">HumanWrenchProvider</elem>
+            </paramlist>
+        </action>
+        <action phase="shutdown" level="4" type="detach" />
     </device>
 
 </robot>
