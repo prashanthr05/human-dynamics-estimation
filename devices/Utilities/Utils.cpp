@@ -387,14 +387,17 @@ void iDynTreeHelper::State::integrator::integrate(iDynTree::VectorDynSize new_do
     oldState.dot_W_p_B = new_dot_W_p_B;
 
     // integrate base orientation
-    iDynTree::Matrix3x3 dot_W_R_B;
+    double rho{0.001};
+    iDynTree::Matrix3x3 dot_W_R_B, correction;
     iDynTree::toEigen(dot_W_R_B) = iDynTree::skew(iDynTree::toEigen(new_omega_B)) * iDynTree::toEigen(oldState.W_R_B);
     //TODO add correction for rotation matrix integration
     //
-    iDynTree::toEigen(oldState.W_R_B) = iDynTree::toEigen(oldState.W_R_B) + iDynTree::toEigen(dot_W_R_B) * dt;
+//     iDynTree::toEigen(oldState.W_R_B) = iDynTree::toEigen(oldState.W_R_B) + iDynTree::toEigen(dot_W_R_B) * dt;
+    iDynTree::toEigen(correction) = iDynTree::toEigen(dot_W_R_B) + ((rho/2.0)*(iDynTree::toEigen(oldState.W_R_B).transpose().inverse() - iDynTree::toEigen(oldState.W_R_B)));
+    iDynTree::toEigen(oldState.W_R_B) += iDynTree::toEigen(correction)*dt;
     // orthonormalization using quaternion
-    iDynTree::Vector4 quaternion = oldState.W_R_B.asQuaternion();
-    oldState.W_R_B.fromQuaternion(quaternion);
+//     iDynTree::Vector4 quaternion = oldState.W_R_B.asQuaternion();
+//     oldState.W_R_B.fromQuaternion(quaternion);
     oldState.dot_omega_B = new_omega_B;
 }
 

@@ -337,11 +337,15 @@ public:
     double flatContactPlaneHeight;
     std::string leftFootString{"LeftFoot"}, rightFootString{"RightFoot"};
 
+    iDynTree::Transform loPose;
+    iDynTree::Twist loTwist;
+
     // log data
     Eigen::VectorXd lfTime, lfContact, rfTime, rfContact, estTime;
     Eigen::VectorXd lfForce, rfForce;
     Eigen::MatrixXd lfWrench, rfWrench;
     Eigen::MatrixXd extPos, extRot, extLinVel, extAngVel;
+    Eigen::MatrixXd ikBasePos, ikBaseRot, ikBaseLinVel, ikBaseAngVel;
     Eigen::MatrixXd linkPos, linkRot, linkLinVel, linkAngVel;
     Eigen::MatrixXd outjointPos, outjointVel, outjointVelFilt;
     Eigen::VectorXd fixedFrame;
@@ -1337,6 +1341,13 @@ void HumanStateProvider::run()
         }
     }
 
+    // overwrite base related measurements with external base estimator
+    if (pImpl->m_extEstimatorInitialized)
+    {
+        pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
+        pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
+    }
+
     // if human-wrench provider is attached, retrieve the links wrenches
     if (pImpl->iHumanWrench)
     {
@@ -1421,7 +1432,7 @@ void HumanStateProvider::run()
              << std::chrono::duration_cast<std::chrono::milliseconds>(tock - tick).count() << "ms";
 
     // updates the filtered velocities in a separate buffer
-    pImpl->lowPassFilterJointVelocities();
+//     pImpl->lowPassFilterJointVelocities();
 
     // If useDirectBaseMeasurement is true, directly use the measured base pose and velocity. If useFixedBase is also enabled,
     // identity transform and zero velocity will be used.
@@ -1434,12 +1445,12 @@ void HumanStateProvider::run()
         pImpl->baseVelocitySolution = pImpl->linkVelocities.at(pImpl->floatingBaseFrame);
     }
 
-//     if (pImpl->baseState == BaseState::external) {
+    if (pImpl->baseState == BaseState::external) {
         bool baseEstimationFailure = !pImpl->updateExternalEstimatorAndDetector();
-//         if (baseEstimationFailure) {
-//             yWarning() << LogPrefix << "External base estimation failed, keeping the previous solution";
-//         }
-//     }
+        if (baseEstimationFailure) {
+            yWarning() << LogPrefix << "External base estimation failed, keeping the previous solution";
+        }
+    }
 
     // CoM position and velocity
     std::array<double, 3> CoM_position, CoM_velocity;
@@ -1662,6 +1673,12 @@ bool HumanStateProvider::impl::updateExternalEstimatorAndDetector()
         }
     }
 
+    Eigen::Quaterniond qB = Eigen::Quaterniond(baseTransformSolution.getRotation().asQuaternion()(0),
+                                               baseTransformSolution.getRotation().asQuaternion()(1),
+                                               baseTransformSolution.getRotation().asQuaternion()(2),
+                                               baseTransformSolution.getRotation().asQuaternion()(3));
+    extLeggedOdom->resetEstimator(qB, iDynTree::toEigen(baseTransformSolution.getPosition()));
+
     if (itrCount < initThresh)
     {
         if (itrCount == initThresh-1)
@@ -1723,7 +1740,6 @@ bool HumanStateProvider::impl::updateExternalEstimatorAndDetector()
     // reset fixed frame pose using contact plane
     auto currentFixedFrame = extLeggedOdom->getFixedFrameIdx();
 
-    yInfo() << "------===================================>" << flatContactPlaneHeight;
     auto worldFpose = extLeggedOdom->getFixedFramePose();
     Eigen::Vector3d worldFpos = worldFpose.translation();
     worldFpos(2) = flatContactPlaneHeight;
@@ -1748,16 +1764,24 @@ bool HumanStateProvider::impl::updateExternalEstimatorAndDetector()
     iDynTree::Vector3 linV, angV;
     iDynTree::toEigen(linV) = out.baseTwist.head<3>();
     iDynTree::toEigen(angV) = out.baseTwist.tail<3>();
-    baseVelocitySolution.setLinearVec3(linV);
-    baseVelocitySolution.setAngularVec3(angV);
+//     baseVelocitySolution.setLinearVec3(linV);
+//     baseVelocitySolution.setAngularVec3(angV);
+    loTwist.setLinearVec3(linV);
+    loTwist.setAngularVec3(angV);
 
+    iDynTree::Transform estTransform;
     iDynTree::Matrix4x4 pose;
     iDynTree::toEigen(pose) = out.basePose.transform();
 //     iDynTree::toEigen(pose).block<3, 3>(0, 0) = iDynTree::toEigen(linkTransformMatricesRaw.at("Pelvis").getRotation());
-    baseTransformSolution.fromHomogeneousTransform(pose);
+//     baseTransformSolution.fromHomogeneousTransform(pose);
+    loPose.fromHomogeneousTransform(pose);
+    estTransform.fromHomogeneousTransform(pose);
 
-    auto pEst = baseTransformSolution.getPosition();
-    auto rpyEst = baseTransformSolution.getRotation().asRPY();
+//     auto pEst = baseTransformSolution.getPosition();
+//     auto rpyEst = baseTransformSolution.getRotation().asRPY();
+
+    auto pEst = estTransform.getPosition();
+    auto rpyEst = estTransform.getRotation().asRPY();
     auto estSize = estTime.rows();
     estTime.conservativeResize(estSize+1);
     extPos.conservativeResize(estSize+1, 3);
@@ -1783,6 +1807,14 @@ bool HumanStateProvider::impl::updateExternalEstimatorAndDetector()
     linkLinVel.row(estSize) << baseTwist(0), baseTwist(1), baseTwist(2);
     linkAngVel.row(estSize) << baseTwist(3), baseTwist(4), baseTwist(5);
 
+    ikBasePos.conservativeResize(estSize+1, 3);
+    ikBaseRot.conservativeResize(estSize+1, 3);
+    ikBaseLinVel.conservativeResize(estSize+1, 3);
+    ikBaseAngVel.conservativeResize(estSize+1, 3);
+    ikBasePos.row(estSize) << iDynTree::toEigen(baseTransformSolution.getPosition());
+    ikBaseRot.row(estSize) << iDynTree::toEigen(baseTransformSolution.getRotation().asRPY());
+    ikBaseLinVel.row(estSize) << iDynTree::toEigen(baseVelocitySolution.getLinearVec3());
+    ikBaseAngVel.row(estSize) << iDynTree::toEigen(baseVelocitySolution.getAngularVec3());
     outjointPos.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
     outjointVel.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
     outjointVelFilt.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
@@ -1790,12 +1822,13 @@ bool HumanStateProvider::impl::updateExternalEstimatorAndDetector()
     {
         outjointPos(estSize, isx) = jointConfigurationSolution(isx);
         outjointVel(estSize, isx) = jointVelocitiesSolution(isx);
-        outjointVelFilt(estSize, isx) = jointVelocitiesSolutionFiltered(isx);
+        if (useJointVelLowPassFilter) {
+            outjointVelFilt(estSize, isx) = jointVelocitiesSolutionFiltered(isx);
+        }
     }
 
     fixedFrame.conservativeResize(estSize+1);
     fixedFrame(estSize) = currentFixedFrame;
-
     return true;
 }
 
@@ -1847,6 +1880,20 @@ bool HumanStateProvider::impl::logData()
                                                       {static_cast<std::size_t>(linkAngVel.rows()), static_cast<std::size_t>(linkAngVel.cols())},
                                                       linkAngVel.data()};
 
+    matioCpp::MultiDimensionalArray<double> outBaseLinkPos{"baseTransformSolutionPos",
+                                                      {static_cast<std::size_t>(ikBasePos.rows()), static_cast<std::size_t>(ikBasePos.cols())},
+                                                      ikBasePos.data()};
+    matioCpp::MultiDimensionalArray<double> outBaseLinkRot{"baseTransformSolutionRot",
+                                                      {static_cast<std::size_t>(ikBaseRot.rows()), static_cast<std::size_t>(ikBaseRot.cols())},
+                                                      ikBaseRot.data()};
+
+    matioCpp::MultiDimensionalArray<double> outBaseLinkLinVel{"baseVelocitySolutionLinVel",
+                                                      {static_cast<std::size_t>(ikBaseLinVel.rows()), static_cast<std::size_t>(ikBaseLinVel.cols())},
+                                                      ikBaseLinVel.data()};
+    matioCpp::MultiDimensionalArray<double> outBaseLinkAngVel{"baseVelocitySolutionAngVel",
+                                                      {static_cast<std::size_t>(ikBaseAngVel.rows()), static_cast<std::size_t>(ikBaseAngVel.cols())},
+                                                      ikBaseAngVel.data()};
+
     matioCpp::MultiDimensionalArray<double> outJPos{"jPos",
                                                       {static_cast<std::size_t>(outjointPos.rows()), static_cast<std::size_t>(outjointPos.cols())},
                                                       outjointPos.data()};
@@ -1886,7 +1933,6 @@ bool HumanStateProvider::impl::logData()
     write_ok = write_ok && file.write(outEstAngVel);
     write_ok = write_ok && file.write(outLinkLinVel);
     write_ok = write_ok && file.write(outLinkAngVel);
-    write_ok = write_ok && file.write(outBaseTime);
 
     write_ok = write_ok && file.write(outlfForceZ);
     write_ok = write_ok && file.write(outrfForceZ);
@@ -1899,6 +1945,11 @@ bool HumanStateProvider::impl::logData()
     write_ok = write_ok && file.write(outJVel);
     write_ok = write_ok && file.write(outJVelFilt);
     write_ok = write_ok && file.write(outFixedFrame);
+
+    write_ok = write_ok && file.write(outBaseLinkPos);
+    write_ok = write_ok && file.write(outBaseLinkRot);
+    write_ok = write_ok && file.write(outBaseLinkLinVel);
+    write_ok = write_ok && file.write(outBaseLinkAngVel);
 
     if (!write_ok)
     {
@@ -2628,7 +2679,7 @@ bool HumanStateProvider::impl::solveIntegrationBasedInverseKinematics()
 //                                     worldGravity);
         computations->setRobotState(baseTransformSolution,
                                     jointConfigurationSolution,
-                                    linkVelocities["Pelvis"],
+                                    baseVelocitySolution,
                                     jointVelocitiesSolution,
                                     worldGravity);
     }
@@ -2654,7 +2705,8 @@ bool HumanStateProvider::impl::solveIntegrationBasedInverseKinematics()
             * linkTransformMatrices[linkName].getRotation().inverse();
         iDynTree::Vector3 angularVelocityError;
 
-        angularVelocityError = iDynTreeHelper::Rotation::skewVee(rotationError);
+//         angularVelocityError = iDynTreeHelper::Rotation::skewVee(rotationError);
+        angularVelocityError = rotationError.log();
         iDynTree::toEigen(integralOrientationError) =
             iDynTree::toEigen(integralOrientationError)
             + iDynTree::toEigen(angularVelocityError) * dt;
@@ -2700,10 +2752,13 @@ bool HumanStateProvider::impl::solveIntegrationBasedInverseKinematics()
                           * integralOrientationError.getVal(i - 3));
         }
 
-        if (linkName == floatingBaseFrame && m_extEstimatorInitialized)
-        {
-            linkVelocities[linkName] = baseVelocitySolution;
-        }
+//         if (linkName == floatingBaseFrame && m_extEstimatorInitialized)
+//         {
+//             for (int idx = 0; idx < 3; idx++) {
+//                 linkVelocities[linkName](idx) = baseVelocitySolution(idx);
+//             }
+//
+//         }
     }
 
     // INVERSE VELOCITY KINEMATICS
@@ -2744,7 +2799,7 @@ bool HumanStateProvider::impl::solveIntegrationBasedInverseKinematics()
         }
     }
 
-    lowPassFilterJointVelocities();
+//     lowPassFilterJointVelocities();
 
     // VELOCITY INTEGRATION
     // integrate velocities measurements
