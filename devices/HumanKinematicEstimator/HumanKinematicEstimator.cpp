@@ -258,6 +258,7 @@ public:
     bool setupExternalBaseEstimator(yarp::os::Searchable& config);
     bool setupExternalContactDetector(yarp::os::Searchable& config);
     bool initializeEstimatorWorld();
+    void setSchmittTriggerInputsUsingHumanWrenches();
     bool updateExternalEstimatorAndDetector();
     bool logData();
 
@@ -1064,9 +1065,196 @@ bool HumanKinematicEstimator::close()
     return true;
 }
 
+
+void HumanKinematicEstimator::impl::setSchmittTriggerInputsUsingHumanWrenches()
+{
+    // if human-wrench provider is attached, retrieve the links wrenches
+    if (iHumanWrench)
+    {
+        // wait for the first wrench data to arrive
+        std::vector<double> wrenchValues = iHumanWrench->getWrenches();
+        for (size_t wrenchSourcesIdx = 0; wrenchSourcesIdx < iHumanWrench->getNumberOfWrenchSources(); wrenchSourcesIdx++)
+        {
+            Eigen::Vector3d force, torque;
+            force << iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx),
+                     iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+1),
+                     iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+2);
+            torque << iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+3),
+                      iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+4),
+                      iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+5);
+            double norm{force.norm()};
+
+            if (iHumanWrench->getWrenchSourceNames().at(wrenchSourcesIdx) == "FTShoeLeft")
+            {
+                Eigen::Matrix3d Rw = iDynTree::toEigen(kinDynComputations->getWorldTransform(leftFootString).getRotation());
+                Eigen::Vector3d f = Rw.transpose()*force;
+                extSchmitt->setTimedTriggerInput(leftFootString,
+                                                 yarp::os::Time::now(),
+                                                 f(2));
+
+                if (m_extEstimatorInitialized)
+                {
+                    auto size = lfForce.size();
+                    lfForce.conservativeResize(size+1);
+                    lfForce(size) = f(2);
+                    lfWrench.conservativeResize(size+1, 6);
+                    lfWrench.row(size) << force, torque;
+
+                }
+            }
+
+            if (iHumanWrench->getWrenchSourceNames().at(wrenchSourcesIdx) == "FTShoeRight")
+            {
+                Eigen::Matrix3d Rw = iDynTree::toEigen(kinDynComputations->getWorldTransform(rightFootString).getRotation());
+                Eigen::Vector3d f = Rw.transpose()*force;
+                extSchmitt->setTimedTriggerInput(rightFootString,
+                                                 yarp::os::Time::now(),
+                                                  f(2));
+
+                if (m_extEstimatorInitialized)
+                {
+                    auto size = rfForce.size();
+                    rfForce.conservativeResize(size+1);
+                    rfForce(size) = f(2);
+                    rfWrench.conservativeResize(size+1, 6);
+                    rfWrench.row(size) << force, torque;
+                }
+            }
+        }
+    }
+}
+
 void HumanKinematicEstimator::run()
 {
+    // Get the link transformations from input data
+    if (!pImpl->getLinkTransformFromInputData(pImpl->linkTransformMatricesRaw)) {
+        yError() << LogPrefix << "Failed to get link transforms from input data";
+        askToStop();
+        return;
+    }
 
+    // Apply the secondary calibration to input data
+    if (!pImpl->applySecondaryCalibration(pImpl->linkTransformMatricesRaw, pImpl->linkTransformMatrices)) {
+        yError() << LogPrefix << "Failed to apply secondary calibration to input data";
+        askToStop();
+        return;
+    }
+
+    // Get the link velocity from input data
+    if (!pImpl->getLinkVelocityFromInputData(pImpl->linkVelocities)) {
+        yError() << LogPrefix << "Failed to get link velocity from input data";
+        askToStop();
+        return;
+    }
+
+    // Use human wrench interface to update schmitt trigger inputs
+    pImpl->setSchmittTriggerInputsUsingHumanWrenches();
+
+    // overwrite base related measurements with external base estimator
+    if (pImpl->m_extEstimatorInitialized)
+    {
+        pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
+        pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
+    }
+
+    // Solve Inverse Kinematics and Inverse Velocity Problems
+    auto tick = std::chrono::high_resolution_clock::now();
+    bool inverseKinematicsFailure;
+    if (pImpl->ikSolver == SolverIK::integrationbased) {
+        inverseKinematicsFailure = !pImpl->solveIntegrationBasedInverseKinematics();
+    }
+
+    // check if inverse kinematics failed
+    if (inverseKinematicsFailure) {
+        if (pImpl->allowIKFailures) {
+            yWarning() << LogPrefix << "IK failed, keeping the previous solution";
+            return;
+        }
+        else {
+            yError() << LogPrefix << "Failed to solve IK";
+            askToStop();
+        }
+        return;
+    }
+
+    auto tock = std::chrono::high_resolution_clock::now();
+    yDebug() << LogPrefix << "IK took"
+             << std::chrono::duration_cast<std::chrono::milliseconds>(tock - tick).count() << "ms";
+
+    // If useDirectBaseMeasurement is true, directly use the measured base pose and velocity. If useFixedBase is also enabled,
+    // identity transform and zero velocity will be used.
+    if (pImpl->useFixedBase) {
+        pImpl->baseTransformSolution = iDynTree::Transform::Identity();
+        pImpl->baseVelocitySolution.zero();
+    }
+    else  if (pImpl->useDirectBaseMeasurement) {
+        pImpl->baseTransformSolution = pImpl->linkTransformMatricesRaw.at(pImpl->floatingBaseFrame);
+        pImpl->baseVelocitySolution = pImpl->linkVelocities.at(pImpl->floatingBaseFrame);
+    }
+
+    if (pImpl->baseState == BaseState::external) {
+        bool baseEstimationFailure = !pImpl->updateExternalEstimatorAndDetector();
+        if (baseEstimationFailure) {
+            yWarning() << LogPrefix << "External base estimation failed, keeping the previous solution";
+        }
+    }
+
+    // CoM position and velocity
+    std::array<double, 3> CoM_position, CoM_velocity;
+    iDynTree::KinDynComputations* kindyncomputations = pImpl->kinDynComputations.get();
+    CoM_position = {kindyncomputations->getCenterOfMassPosition().getVal(0),
+                    kindyncomputations->getCenterOfMassPosition().getVal(1),
+                    kindyncomputations->getCenterOfMassPosition().getVal(2)};
+
+    CoM_velocity = {kindyncomputations->getCenterOfMassVelocity().getVal(0),
+                    kindyncomputations->getCenterOfMassVelocity().getVal(1),
+                    kindyncomputations->getCenterOfMassVelocity().getVal(2)};
+
+    // Expose IK solution for IHumanState
+    {
+        std::lock_guard<std::mutex> lock(pImpl->mutex);
+
+        for (unsigned i = 0; i < pImpl->jointConfigurationSolution.size(); ++i) {
+            pImpl->solution.jointPositions[i] = pImpl->jointConfigurationSolution.getVal(i);
+            pImpl->solution.jointVelocities[i] = pImpl->jointVelocitiesSolution.getVal(i);
+        }
+
+        pImpl->solution.basePosition = {pImpl->baseTransformSolution.getPosition().getVal(0),
+                                        pImpl->baseTransformSolution.getPosition().getVal(1),
+                                        pImpl->baseTransformSolution.getPosition().getVal(2)};
+
+        pImpl->solution.baseOrientation = {
+            pImpl->baseTransformSolution.getRotation().asQuaternion().getVal(0),
+            pImpl->baseTransformSolution.getRotation().asQuaternion().getVal(1),
+            pImpl->baseTransformSolution.getRotation().asQuaternion().getVal(2),
+            pImpl->baseTransformSolution.getRotation().asQuaternion().getVal(3)};
+
+        // Use measured base frame velocity
+        pImpl->solution.baseVelocity = {pImpl->baseVelocitySolution.getVal(0),
+                                        pImpl->baseVelocitySolution.getVal(1),
+                                        pImpl->baseVelocitySolution.getVal(2),
+                                        pImpl->baseVelocitySolution.getVal(3),
+                                        pImpl->baseVelocitySolution.getVal(4),
+                                        pImpl->baseVelocitySolution.getVal(5)};
+        // CoM position and velocity
+        pImpl->solution.CoMPosition = {CoM_position[0], CoM_position[1], CoM_position[2]};
+        pImpl->solution.CoMVelocity = {CoM_velocity[0], CoM_velocity[1], CoM_velocity[2]};
+    }
+
+    // Check for rpc command status and apply command
+    if (pImpl->commandPro->cmdStatus != rpcCommand::empty) {
+
+        // Apply rpc command
+        if (!pImpl->applyRpcCommand()) {
+            yWarning() << LogPrefix << "Failed to execute the rpc command";
+        }
+
+        // reset the rpc internal status
+        {
+            std::lock_guard<std::mutex> lock(pImpl->mutex);
+            pImpl->commandPro->resetInternalVariables();
+        }
+    }
 }
 
 
@@ -1739,23 +1927,11 @@ bool HumanKinematicEstimator::impl::solveIntegrationBasedInverseKinematics()
     // LINK VELOCITY CORRECTION
     iDynTree::KinDynComputations* computations = kinDynComputations.get();
 
-    if (useDirectBaseMeasurement) {
-//         computations->setRobotState(jointConfigurationSolution,
-//                                     jointVelocitiesSolution,
-//                                     worldGravity);
-        computations->setRobotState(baseTransformSolution,
-                                    jointConfigurationSolution,
-                                    baseVelocitySolution,
-                                    jointVelocitiesSolution,
-                                    worldGravity);
-    }
-    else {
-        computations->setRobotState(baseTransformSolution,
-                                    jointConfigurationSolution,
-                                    baseVelocitySolution,
-                                    jointVelocitiesSolution,
-                                    worldGravity);
-    }
+    computations->setRobotState(baseTransformSolution,
+                                jointConfigurationSolution,
+                                baseVelocitySolution,
+                                jointVelocitiesSolution,
+                                worldGravity);
 
     for (size_t linkIndex = 0; linkIndex < humanModel.getNrOfLinks(); ++linkIndex) {
         std::string linkName = humanModel.getLinkName(linkIndex);
