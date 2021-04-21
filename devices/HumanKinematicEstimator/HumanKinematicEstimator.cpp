@@ -12,7 +12,6 @@
 #include "IHumanWrench.h"
 
 #include <Wearable/IWear/IWear.h>
-#include <iDynTree/InverseKinematics.h>
 #include <iDynTree/Model/Model.h>
 #include <iDynTree/ModelIO/ModelLoader.h>
 #include <yarp/os/LogStream.h>
@@ -23,6 +22,7 @@
 #include <iDynTree/Core/EigenHelpers.h>
 #include <iDynTree/Model/Traversal.h>
 
+#include <Eigen/Dense>
 #include <BipedalLocomotion/ParametersHandler/YarpImplementation.h>
 #include <BipedalLocomotion/FloatingBaseEstimators/LeggedOdometry.h>
 #include <BipedalLocomotion/ContactDetectors/SchmittTriggerDetector.h>
@@ -132,6 +132,18 @@ struct WearableStorage
         jointSensorsMap;
 };
 
+struct Loggable
+{
+    Eigen::VectorXd lfTime, lfContact, rfTime, rfContact, estTime;
+    Eigen::VectorXd lfForce, rfForce;
+    Eigen::MatrixXd lfWrench, rfWrench;
+    Eigen::MatrixXd extPos, extRot, extLinVel, extAngVel;
+    Eigen::MatrixXd ikBasePos, ikBaseRot, ikBaseLinVel, ikBaseAngVel;
+    Eigen::MatrixXd linkPos, linkRot, linkLinVel, linkAngVel;
+    Eigen::MatrixXd outjointPos, outjointVel, outjointVelFilt;
+    Eigen::VectorXd fixedFrame;
+};
+
 class HumanKinematicEstimator::impl
 {
 public:
@@ -171,10 +183,6 @@ public:
 
     iDynTree::Vector3 integralOrientationError;
     iDynTree::Vector3 integralLinearVelocityError;
-
-    std::unordered_map<std::string, iDynTreeHelper::Rotation::rotationDistance>
-        linkErrorOrientations;
-    std::unordered_map<std::string, iDynTree::Vector3> linkErrorAngularVelocities;
 
     // IK parameters
     int maxIterationsIK;
@@ -274,14 +282,7 @@ public:
     iDynTree::Twist loTwist;
 
     // log data
-    Eigen::VectorXd lfTime, lfContact, rfTime, rfContact, estTime;
-    Eigen::VectorXd lfForce, rfForce;
-    Eigen::MatrixXd lfWrench, rfWrench;
-    Eigen::MatrixXd extPos, extRot, extLinVel, extAngVel;
-    Eigen::MatrixXd ikBasePos, ikBaseRot, ikBaseLinVel, ikBaseAngVel;
-    Eigen::MatrixXd linkPos, linkRot, linkLinVel, linkAngVel;
-    Eigen::MatrixXd outjointPos, outjointVel, outjointVelFilt;
-    Eigen::VectorXd fixedFrame;
+    Loggable log;
 
     // constructor
     impl();
@@ -1089,11 +1090,11 @@ void HumanKinematicEstimator::impl::setSchmittTriggerInputsUsingHumanWrenches()
 
                 if (m_extEstimatorInitialized)
                 {
-                    auto size = lfForce.size();
-                    lfForce.conservativeResize(size+1);
-                    lfForce(size) = f(2);
-                    lfWrench.conservativeResize(size+1, 6);
-                    lfWrench.row(size) << force, torque;
+                    auto size = log.lfForce.size();
+                    log.lfForce.conservativeResize(size+1);
+                    log.lfForce(size) = f(2);
+                    log.lfWrench.conservativeResize(size+1, 6);
+                    log.lfWrench.row(size) << force, torque;
 
                 }
             }
@@ -1108,11 +1109,11 @@ void HumanKinematicEstimator::impl::setSchmittTriggerInputsUsingHumanWrenches()
 
                 if (m_extEstimatorInitialized)
                 {
-                    auto size = rfForce.size();
-                    rfForce.conservativeResize(size+1);
-                    rfForce(size) = f(2);
-                    rfWrench.conservativeResize(size+1, 6);
-                    rfWrench.row(size) << force, torque;
+                    auto size = log.rfForce.size();
+                    log.rfForce.conservativeResize(size+1);
+                    log.rfForce(size) = f(2);
+                    log.rfWrench.conservativeResize(size+1, 6);
+                    log.rfWrench.row(size) << force, torque;
                 }
             }
         }
@@ -1369,20 +1370,20 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
         extLeggedOdom->setContactStatus(name, contact.isActive, contact.switchTime);
 
         if (name == leftFootString) {
-            auto size = lfContact.size();
-            lfContact.conservativeResize(size+1);
-            lfTime.conservativeResize(size+1);
-            lfContact(size) = static_cast<int>(contact.isActive);
-            lfTime(size) = contact.lastUpdateTime;
+            auto size = log.lfContact.size();
+            log.lfContact.conservativeResize(size+1);
+            log.lfTime.conservativeResize(size+1);
+            log.lfContact(size) = static_cast<int>(contact.isActive);
+            log.lfTime(size) = contact.lastUpdateTime;
             yInfo() << "LF Contact: " << static_cast<int>(contact.isActive);
         }
 
         if (name == rightFootString) {
-            auto size = rfContact.size();
-            rfContact.conservativeResize(size+1);
-            rfTime.conservativeResize(size+1);
-            rfContact(size) = static_cast<int>(contact.isActive);
-            rfTime(size) = contact.lastUpdateTime;
+            auto size = log.rfContact.size();
+            log.rfContact.conservativeResize(size+1);
+            log.rfTime.conservativeResize(size+1);
+            log.rfContact(size) = static_cast<int>(contact.isActive);
+            log.rfTime(size) = contact.lastUpdateTime;
             yInfo() << "RF Contact: " << static_cast<int>(contact.isActive);
         }
     }
@@ -1437,50 +1438,50 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
 
     auto pEst = estTransform.getPosition();
     auto rpyEst = estTransform.getRotation().asRPY();
-    auto estSize = estTime.rows();
-    estTime.conservativeResize(estSize+1);
-    extPos.conservativeResize(estSize+1, 3);
-    extRot.conservativeResize(estSize+1, 3);
-    extLinVel.conservativeResize(estSize+1, 3);
-    extAngVel.conservativeResize(estSize+1, 3);
-    extPos.row(estSize) << pEst(0), pEst(1), pEst(2);
-    extRot.row(estSize) << rpyEst(0), rpyEst(1), rpyEst(2);
-    extLinVel.row(estSize) << out.baseTwist(0), out.baseTwist(1), out.baseTwist(2);
-    extAngVel.row(estSize) << out.baseTwist(3), out.baseTwist(4), out.baseTwist(5);
+    auto estSize = log.estTime.rows();
+    log.estTime.conservativeResize(estSize+1);
+    log.extPos.conservativeResize(estSize+1, 3);
+    log.extRot.conservativeResize(estSize+1, 3);
+    log.extLinVel.conservativeResize(estSize+1, 3);
+    log.extAngVel.conservativeResize(estSize+1, 3);
+    log.extPos.row(estSize) << pEst(0), pEst(1), pEst(2);
+    log.extRot.row(estSize) << rpyEst(0), rpyEst(1), rpyEst(2);
+    log.extLinVel.row(estSize) << out.baseTwist(0), out.baseTwist(1), out.baseTwist(2);
+    log.extAngVel.row(estSize) << out.baseTwist(3), out.baseTwist(4), out.baseTwist(5);
 
     auto w_H_b = linkTransformMatricesRaw.at("Pelvis");
 
     auto pOut = linkTransformMatricesRaw.at("Pelvis").getPosition();
     auto rpyOut = linkTransformMatricesRaw.at("Pelvis").getRotation().asRPY();
     auto baseTwist = linkVelocities.at("Pelvis");
-    linkPos.conservativeResize(estSize+1, 3);
-    linkRot.conservativeResize(estSize+1, 3);
-    linkLinVel.conservativeResize(estSize+1, 3);
-    linkAngVel.conservativeResize(estSize+1, 3);
-    linkPos.row(estSize) << pOut(0), pOut(1), pOut(2);
-    linkRot.row(estSize) << rpyOut(0), rpyOut(1), rpyOut(2);
-    linkLinVel.row(estSize) << baseTwist(0), baseTwist(1), baseTwist(2);
-    linkAngVel.row(estSize) << baseTwist(3), baseTwist(4), baseTwist(5);
+    log.linkPos.conservativeResize(estSize+1, 3);
+    log.linkRot.conservativeResize(estSize+1, 3);
+    log.linkLinVel.conservativeResize(estSize+1, 3);
+    log.linkAngVel.conservativeResize(estSize+1, 3);
+    log.linkPos.row(estSize) << pOut(0), pOut(1), pOut(2);
+    log.linkRot.row(estSize) << rpyOut(0), rpyOut(1), rpyOut(2);
+    log.linkLinVel.row(estSize) << baseTwist(0), baseTwist(1), baseTwist(2);
+    log.linkAngVel.row(estSize) << baseTwist(3), baseTwist(4), baseTwist(5);
 
-    ikBasePos.conservativeResize(estSize+1, 3);
-    ikBaseRot.conservativeResize(estSize+1, 3);
-    ikBaseLinVel.conservativeResize(estSize+1, 3);
-    ikBaseAngVel.conservativeResize(estSize+1, 3);
-    ikBasePos.row(estSize) << iDynTree::toEigen(baseTransformSolution.getPosition());
-    ikBaseRot.row(estSize) << iDynTree::toEigen(baseTransformSolution.getRotation().asRPY());
-    ikBaseLinVel.row(estSize) << iDynTree::toEigen(baseVelocitySolution.getLinearVec3());
-    ikBaseAngVel.row(estSize) << iDynTree::toEigen(baseVelocitySolution.getAngularVec3());
-    outjointPos.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
-    outjointVel.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
-    outjointVelFilt.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
+    log.ikBasePos.conservativeResize(estSize+1, 3);
+    log.ikBaseRot.conservativeResize(estSize+1, 3);
+    log.ikBaseLinVel.conservativeResize(estSize+1, 3);
+    log.ikBaseAngVel.conservativeResize(estSize+1, 3);
+    log.ikBasePos.row(estSize) << iDynTree::toEigen(baseTransformSolution.getPosition());
+    log.ikBaseRot.row(estSize) << iDynTree::toEigen(baseTransformSolution.getRotation().asRPY());
+    log.ikBaseLinVel.row(estSize) << iDynTree::toEigen(baseVelocitySolution.getLinearVec3());
+    log.ikBaseAngVel.row(estSize) << iDynTree::toEigen(baseVelocitySolution.getAngularVec3());
+    log.outjointPos.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
+    log.outjointVel.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
+    log.outjointVelFilt.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
     for (int isx =0; isx < kinDynComputations->getNrOfDegreesOfFreedom(); isx++)
     {
-        outjointPos(estSize, isx) = jointConfigurationSolution(isx);
-        outjointVel(estSize, isx) = jointVelocitiesSolution(isx);
+        log.outjointPos(estSize, isx) = jointConfigurationSolution(isx);
+        log.outjointVel(estSize, isx) = jointVelocitiesSolution(isx);
     }
 
-    fixedFrame.conservativeResize(estSize+1);
-    fixedFrame(estSize) = currentFixedFrame;
+    log.fixedFrame.conservativeResize(estSize+1);
+    log.fixedFrame(estSize) = currentFixedFrame;
     return true;
 }
 
@@ -1508,71 +1509,71 @@ bool HumanKinematicEstimator::impl::logData()
 {
     matioCpp::File file = matioCpp::File::Create("out-HDE-matiocpp.mat");
     matioCpp::MultiDimensionalArray<double> outEstPos{"estBasePos",
-                                                      {static_cast<std::size_t>(extPos.rows()), static_cast<std::size_t>(extPos.cols())},
-                                                      extPos.data()};
+                                                      {static_cast<std::size_t>(log.extPos.rows()), static_cast<std::size_t>(log.extPos.cols())},
+                                                      log.extPos.data()};
     matioCpp::MultiDimensionalArray<double> outEstRot{"estBaseRot",
-                                                      {static_cast<std::size_t>(extRot.rows()), static_cast<std::size_t>(extRot.cols())},
-                                                      extRot.data()};
+                                                      {static_cast<std::size_t>(log.extRot.rows()), static_cast<std::size_t>(log.extRot.cols())},
+                                                      log.extRot.data()};
     matioCpp::MultiDimensionalArray<double> outLinkPos{"linkBasePos",
-                                                      {static_cast<std::size_t>(linkPos.rows()), static_cast<std::size_t>(linkPos.cols())},
-                                                      linkPos.data()};
+                                                      {static_cast<std::size_t>(log.linkPos.rows()), static_cast<std::size_t>(log.linkPos.cols())},
+                                                      log.linkPos.data()};
     matioCpp::MultiDimensionalArray<double> outLinkRot{"linkBaseRot",
-                                                      {static_cast<std::size_t>(linkRot.rows()), static_cast<std::size_t>(linkRot.cols())},
-                                                      linkRot.data()};
+                                                      {static_cast<std::size_t>(log.linkRot.rows()), static_cast<std::size_t>(log.linkRot.cols())},
+                                                      log.linkRot.data()};
     matioCpp::MultiDimensionalArray<double> outEstLinVel{"estBaseLinVel",
-                                                      {static_cast<std::size_t>(extLinVel.rows()), static_cast<std::size_t>(extLinVel.cols())},
-                                                      extLinVel.data()};
+                                                      {static_cast<std::size_t>(log.extLinVel.rows()), static_cast<std::size_t>(log.extLinVel.cols())},
+                                                      log.extLinVel.data()};
     matioCpp::MultiDimensionalArray<double> outEstAngVel{"estBaseAngVel",
-                                                      {static_cast<std::size_t>(extAngVel.rows()), static_cast<std::size_t>(extAngVel.cols())},
-                                                      extAngVel.data()};
+                                                      {static_cast<std::size_t>(log.extAngVel.rows()), static_cast<std::size_t>(log.extAngVel.cols())},
+                                                      log.extAngVel.data()};
     matioCpp::MultiDimensionalArray<double> outLinkLinVel{"linkBaseLinVel",
-                                                      {static_cast<std::size_t>(linkLinVel.rows()), static_cast<std::size_t>(linkLinVel.cols())},
-                                                      linkLinVel.data()};
+                                                      {static_cast<std::size_t>(log.linkLinVel.rows()), static_cast<std::size_t>(log.linkLinVel.cols())},
+                                                      log.linkLinVel.data()};
     matioCpp::MultiDimensionalArray<double> outLinkAngVel{"linkBaseAngVel",
-                                                      {static_cast<std::size_t>(linkAngVel.rows()), static_cast<std::size_t>(linkAngVel.cols())},
-                                                      linkAngVel.data()};
+                                                      {static_cast<std::size_t>(log.linkAngVel.rows()), static_cast<std::size_t>(log.linkAngVel.cols())},
+                                                      log.linkAngVel.data()};
 
     matioCpp::MultiDimensionalArray<double> outBaseLinkPos{"baseTransformSolutionPos",
-                                                      {static_cast<std::size_t>(ikBasePos.rows()), static_cast<std::size_t>(ikBasePos.cols())},
-                                                      ikBasePos.data()};
+                                                      {static_cast<std::size_t>(log.ikBasePos.rows()), static_cast<std::size_t>(log.ikBasePos.cols())},
+                                                      log.ikBasePos.data()};
     matioCpp::MultiDimensionalArray<double> outBaseLinkRot{"baseTransformSolutionRot",
-                                                      {static_cast<std::size_t>(ikBaseRot.rows()), static_cast<std::size_t>(ikBaseRot.cols())},
-                                                      ikBaseRot.data()};
+                                                      {static_cast<std::size_t>(log.ikBaseRot.rows()), static_cast<std::size_t>(log.ikBaseRot.cols())},
+                                                      log.ikBaseRot.data()};
 
     matioCpp::MultiDimensionalArray<double> outBaseLinkLinVel{"baseVelocitySolutionLinVel",
-                                                      {static_cast<std::size_t>(ikBaseLinVel.rows()), static_cast<std::size_t>(ikBaseLinVel.cols())},
-                                                      ikBaseLinVel.data()};
+                                                      {static_cast<std::size_t>(log.ikBaseLinVel.rows()), static_cast<std::size_t>(log.ikBaseLinVel.cols())},
+                                                      log.ikBaseLinVel.data()};
     matioCpp::MultiDimensionalArray<double> outBaseLinkAngVel{"baseVelocitySolutionAngVel",
-                                                      {static_cast<std::size_t>(ikBaseAngVel.rows()), static_cast<std::size_t>(ikBaseAngVel.cols())},
-                                                      ikBaseAngVel.data()};
+                                                      {static_cast<std::size_t>(log.ikBaseAngVel.rows()), static_cast<std::size_t>(log.ikBaseAngVel.cols())},
+                                                      log.ikBaseAngVel.data()};
 
     matioCpp::MultiDimensionalArray<double> outJPos{"jPos",
-                                                      {static_cast<std::size_t>(outjointPos.rows()), static_cast<std::size_t>(outjointPos.cols())},
-                                                      outjointPos.data()};
+                                                      {static_cast<std::size_t>(log.outjointPos.rows()), static_cast<std::size_t>(log.outjointPos.cols())},
+                                                      log.outjointPos.data()};
     matioCpp::MultiDimensionalArray<double> outJVel{"jVel",
-                                                      {static_cast<std::size_t>(outjointVel.rows()), static_cast<std::size_t>(outjointVel.cols())},
-                                                      outjointVel.data()};
+                                                      {static_cast<std::size_t>(log.outjointVel.rows()), static_cast<std::size_t>(log.outjointVel.cols())},
+                                                      log.outjointVel.data()};
     matioCpp::MultiDimensionalArray<double> outJVelFilt{"jVelFilt",
-                                                      {static_cast<std::size_t>(outjointVelFilt.rows()), static_cast<std::size_t>(outjointVelFilt.cols())},
-                                                      outjointVelFilt.data()};
+                                                      {static_cast<std::size_t>(log.outjointVelFilt.rows()), static_cast<std::size_t>(log.outjointVelFilt.cols())},
+                                                      log.outjointVelFilt.data()};
 
     matioCpp::MultiDimensionalArray<double> outlfWrench{"lfWrench",
-                                                      {static_cast<std::size_t>(lfWrench.rows()), static_cast<std::size_t>(lfWrench.cols())},
-                                                      lfWrench.data()};
+                                                      {static_cast<std::size_t>(log.lfWrench.rows()), static_cast<std::size_t>(log.lfWrench.cols())},
+                                                      log.lfWrench.data()};
     matioCpp::MultiDimensionalArray<double> outrfWrench{"rfWrench",
-                                                      {static_cast<std::size_t>(rfWrench.rows()), static_cast<std::size_t>(rfWrench.cols())},
-                                                      rfWrench.data()};
+                                                      {static_cast<std::size_t>(log.rfWrench.rows()), static_cast<std::size_t>(log.rfWrench.cols())},
+                                                      log.rfWrench.data()};
 
-    auto outContactlf = BipedalLocomotion::Conversions::tomatioCpp(lfContact, "estLFContact");
-    auto outContactrf = BipedalLocomotion::Conversions::tomatioCpp(rfContact, "estRFContact");
-    auto outlfForceZ = BipedalLocomotion::Conversions::tomatioCpp(lfForce, "LFForceZ");
-    auto outrfForceZ = BipedalLocomotion::Conversions::tomatioCpp(rfForce, "RFForceZ");
-    auto outContactlfTime = BipedalLocomotion::Conversions::tomatioCpp(lfTime, "estLFContactTime");
-    auto outContactrfTime = BipedalLocomotion::Conversions::tomatioCpp(rfTime, "estRFContactTime");
+    auto outContactlf = BipedalLocomotion::Conversions::tomatioCpp(log.lfContact, "estLFContact");
+    auto outContactrf = BipedalLocomotion::Conversions::tomatioCpp(log.rfContact, "estRFContact");
+    auto outlfForceZ = BipedalLocomotion::Conversions::tomatioCpp(log.lfForce, "LFForceZ");
+    auto outrfForceZ = BipedalLocomotion::Conversions::tomatioCpp(log.rfForce, "RFForceZ");
+    auto outContactlfTime = BipedalLocomotion::Conversions::tomatioCpp(log.lfTime, "estLFContactTime");
+    auto outContactrfTime = BipedalLocomotion::Conversions::tomatioCpp(log.rfTime, "estRFContactTime");
 
 
-    auto outBaseTime = BipedalLocomotion::Conversions::tomatioCpp(estTime, "estBaseTime");
-    auto outFixedFrame = BipedalLocomotion::Conversions::tomatioCpp(fixedFrame, "estFixedFrame");
+    auto outBaseTime = BipedalLocomotion::Conversions::tomatioCpp(log.estTime, "estBaseTime");
+    auto outFixedFrame = BipedalLocomotion::Conversions::tomatioCpp(log.fixedFrame, "estFixedFrame");
 
 
     bool write_ok{true};
@@ -1592,6 +1593,8 @@ bool HumanKinematicEstimator::impl::logData()
     write_ok = write_ok && file.write(outContactlf);
     write_ok = write_ok && file.write(outContactlfTime);
     write_ok = write_ok && file.write(outContactrfTime);
+    write_ok = write_ok && file.write(outlfWrench);
+    write_ok = write_ok && file.write(outrfWrench);
 
     write_ok = write_ok && file.write(outJPos);
     write_ok = write_ok && file.write(outJVel);

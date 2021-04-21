@@ -8,6 +8,7 @@ find_package(OsqpEigen 0.4.0 REQUIRED)
 find_package(ICUB REQUIRED)
 find_package(manif REQUIRED)
 find_package(matioCpp REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(BipedalLocomotionFramework REQUIRED)
 
 yarp_prepare_plugin(human_kinematic_estimator
@@ -40,6 +41,7 @@ target_link_libraries(HumanKinematicEstimator PUBLIC
     UtilityLibrary
     OsqpEigen::OsqpEigen
     osqp::osqp
+    Eigen3::Eigen
     BipedalLocomotion::ParametersHandlerYarpImplementation
     BipedalLocomotion::FloatingBaseEstimators
     BipedalLocomotion::ContactDetectors
