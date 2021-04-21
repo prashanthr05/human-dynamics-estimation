@@ -1420,8 +1420,8 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
     iDynTree::Vector3 linV, angV;
     iDynTree::toEigen(linV) = out.baseTwist.head<3>();
     iDynTree::toEigen(angV) = out.baseTwist.tail<3>();
-//     baseVelocitySolution.setLinearVec3(linV);
-//     baseVelocitySolution.setAngularVec3(angV);
+    baseVelocitySolution.setLinearVec3(linV);
+    baseVelocitySolution.setAngularVec3(angV);
     loTwist.setLinearVec3(linV);
     loTwist.setAngularVec3(angV);
 
@@ -1429,7 +1429,7 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
     iDynTree::Matrix4x4 pose;
     iDynTree::toEigen(pose) = out.basePose.transform();
 //     iDynTree::toEigen(pose).block<3, 3>(0, 0) = iDynTree::toEigen(linkTransformMatricesRaw.at("Pelvis").getRotation());
-//     baseTransformSolution.fromHomogeneousTransform(pose);
+    baseTransformSolution.fromHomogeneousTransform(pose);
     loPose.fromHomogeneousTransform(pose);
     estTransform.fromHomogeneousTransform(pose);
 
@@ -1463,14 +1463,19 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
     log.linkLinVel.row(estSize) << baseTwist(0), baseTwist(1), baseTwist(2);
     log.linkAngVel.row(estSize) << baseTwist(3), baseTwist(4), baseTwist(5);
 
+    auto ikPos =baseTransformSolution.getPosition();
+    auto ikRPY = baseTransformSolution.getRotation().asRPY();
+    auto ikLinV = baseVelocitySolution.getLinearVec3();
+    auto ikAngV = baseVelocitySolution.getAngularVec3();
     log.ikBasePos.conservativeResize(estSize+1, 3);
     log.ikBaseRot.conservativeResize(estSize+1, 3);
     log.ikBaseLinVel.conservativeResize(estSize+1, 3);
     log.ikBaseAngVel.conservativeResize(estSize+1, 3);
-    log.ikBasePos.row(estSize) << iDynTree::toEigen(baseTransformSolution.getPosition());
-    log.ikBaseRot.row(estSize) << iDynTree::toEigen(baseTransformSolution.getRotation().asRPY());
-    log.ikBaseLinVel.row(estSize) << iDynTree::toEigen(baseVelocitySolution.getLinearVec3());
-    log.ikBaseAngVel.row(estSize) << iDynTree::toEigen(baseVelocitySolution.getAngularVec3());
+    log.ikBasePos.row(estSize) << iDynTree::toEigen(ikPos);
+    log.ikBaseRot.row(estSize) << iDynTree::toEigen(ikRPY);
+    log.ikBaseLinVel.row(estSize) << iDynTree::toEigen(ikLinV);
+    log.ikBaseAngVel.row(estSize) << iDynTree::toEigen(ikAngV);
+
     log.outjointPos.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
     log.outjointVel.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
     log.outjointVelFilt.conservativeResize(estSize+1, kinDynComputations->getNrOfDegreesOfFreedom());
