@@ -2,9 +2,10 @@
 # This software may be modified and distributed under the terms of the
 # GNU Lesser General Public License v2.1 or any later version.
 
-add_subdirectory(HumanStateProvider)
+add_subdirectory(HumanKinematicEstimator)
 add_subdirectory(HumanWrenchProvider)
 add_subdirectory(HumanDynamicsEstimator)
+add_subdirectory(HumanStateProvider)
 add_subdirectory(HumanControlBoard)
 add_subdirectory(RobotPositionController)
 add_subdirectory(Utilities)
