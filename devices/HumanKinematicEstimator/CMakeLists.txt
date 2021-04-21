@@ -20,8 +20,6 @@ yarp_prepare_plugin(human_kinematic_estimator
 yarp_add_plugin(HumanKinematicEstimator
     HumanKinematicEstimator.cpp
     HumanKinematicEstimator.h
-    IKWorkerPool.cpp
-    IKWorkerPool.h
     InverseVelocityKinematics/InverseVelocityKinematics.cpp
     InverseVelocityKinematics/InverseVelocityKinematics.hpp)
 
@@ -42,7 +40,6 @@ target_link_libraries(HumanKinematicEstimator PUBLIC
     UtilityLibrary
     OsqpEigen::OsqpEigen
     osqp::osqp
-    ctrlLib
     BipedalLocomotion::ParametersHandlerYarpImplementation
     BipedalLocomotion::FloatingBaseEstimators
     BipedalLocomotion::ContactDetectors

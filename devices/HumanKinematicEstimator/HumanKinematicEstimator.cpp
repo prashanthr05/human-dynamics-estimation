@@ -24,7 +24,6 @@
 #include <iDynTree/Core/EigenHelpers.h>
 #include <iDynTree/Model/Traversal.h>
 
-#include <iCub/ctrl/filters.h>
 // #include <yarp/sig/Vector.h>
 #include <iDynTree/yarp/YARPConversions.h>
 
@@ -315,10 +314,6 @@ public:
     bool updateExternalEstimatorAndDetector();
     bool logData();
 
-    // joint velocity low pass filter
-    bool setupJointVelLowPassFilter(yarp::os::Searchable& config);
-    void lowPassFilterJointVelocities();
-
     // external base estimator and contact detector
     std::unique_ptr<BipedalLocomotion::Estimators::LeggedOdometry> extLeggedOdom;
     std::unique_ptr<BipedalLocomotion::Contacts::SchmittTriggerDetector> extSchmitt;
@@ -327,12 +322,7 @@ public:
     bool m_extEstimatorInitialized{false};
     int itrCount{0};
     int initThresh{400};
-    // joint velocity low pass filter
-    bool useJointVelLowPassFilter{false};
-    std::unique_ptr<iCub::ctrl::FirstOrderLowPassFilter> jointVelLowPassFilter;
-    double jointVelFiltCutoffFreq{1};
-    double jointVelFiltSamplingPeriod{0.02};
-    bool jointVelFiltInitialized{false};
+
     double flatContactPlaneInclinationRoll, flatContactPlaneInclinationPitch;
     double flatContactPlaneHeight;
     std::string leftFootString{"LeftFoot"}, rightFootString{"RightFoot"};
@@ -1187,10 +1177,6 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
         }
     }
 
-    if (!pImpl->setupJointVelLowPassFilter(config)) {
-        return false;
-    }
-
     // ==================================
     // INITIALIZE EXTERNAL BASE ESTIMATOR
     // ==================================
@@ -1223,34 +1209,6 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
 
     // Set rpc port reader
     pImpl->rpcPort.setReader(*pImpl->commandPro);
-
-    return true;
-}
-
-bool HumanKinematicEstimator::impl::setupJointVelLowPassFilter(yarp::os::Searchable& config)
-{
-    if (!(config.check("useJointVelLowPassFilter") && config.find("useJointVelLowPassFilter").isBool())) {
-        useJointVelLowPassFilter = false;
-    }
-    else {
-        useJointVelLowPassFilter = config.find("useJointVelLowPassFilter").asBool();
-    }
-    if (useJointVelLowPassFilter)
-    {
-        if (!(config.check("jointVelLowPassFilterCutOffFreq") && config.find("jointVelLowPassFilterCutOffFreq").isDouble())) {
-            yError() << LogPrefix
-                     << "jointVelLowPassFilterCutOffFreq option not found or not valid";
-            return false;
-        }
-
-        jointVelFiltCutoffFreq = config.find("jointVelLowPassFilterCutOffFreq").asDouble();
-        jointVelFiltSamplingPeriod = period;
-        jointVelLowPassFilter = std::make_unique<iCub::ctrl::FirstOrderLowPassFilter>(jointVelFiltCutoffFreq, jointVelFiltSamplingPeriod);
-        yInfo() << LogPrefix << "*** Joint velocity low pass filter cut off frequency     :"
-                << jointVelFiltCutoffFreq;
-        yInfo() << LogPrefix << "*** Joint velocity low pass filter sampling period     :"
-                << jointVelFiltSamplingPeriod;
-    }
 
     return true;
 }
@@ -1312,27 +1270,6 @@ bool HumanKinematicEstimator::close()
 void HumanKinematicEstimator::run()
 {
 
-}
-
-void HumanKinematicEstimator::impl::lowPassFilterJointVelocities()
-{
-    if (useJointVelLowPassFilter) {
-        if (!jointVelFiltInitialized) {
-            yarp::sig::Vector initVel(jointVelocitiesSolution.size());
-            iDynTree::toYarp(jointVelocitiesSolution, initVel);
-            jointVelLowPassFilter->init(initVel);
-            jointVelFiltInitialized = true;
-        }
-        else {
-            yarp::sig::Vector unfiltVel(jointVelocitiesSolution.size());
-            iDynTree::toYarp(jointVelocitiesSolution, unfiltVel);
-            const yarp::sig::Vector& filtVel = jointVelLowPassFilter->filt(unfiltVel);
-            iDynTree::toiDynTree(filtVel, jointVelocitiesSolutionFiltered);
-        }
-    }
-    else {
-        jointVelocitiesSolutionFiltered = jointVelocitiesSolution;
-    }
 }
 
 
@@ -1447,22 +1384,13 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
         yError() << LogPrefix << "Could not update the Schmitt trigger detector" ;
     }
 
-    if (useJointVelLowPassFilter)
+
+    if (!extLeggedOdom->setKinematics(iDynTree::toEigen(jointConfigurationSolution),
+                                    iDynTree::toEigen(jointVelocitiesSolution)))
     {
-        if (!extLeggedOdom->setKinematics(iDynTree::toEigen(jointConfigurationSolution),
-                                      iDynTree::toEigen(jointVelocitiesSolutionFiltered)))
-        {
-            return false;
-        }
+        return false;
     }
-    else
-    {
-        if (!extLeggedOdom->setKinematics(iDynTree::toEigen(jointConfigurationSolution),
-                                        iDynTree::toEigen(jointVelocitiesSolution)))
-        {
-            return false;
-        }
-    }
+
 
     Eigen::Quaterniond qB = Eigen::Quaterniond(baseTransformSolution.getRotation().asQuaternion()(0),
                                                baseTransformSolution.getRotation().asQuaternion()(1),
@@ -1613,9 +1541,6 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
     {
         outjointPos(estSize, isx) = jointConfigurationSolution(isx);
         outjointVel(estSize, isx) = jointVelocitiesSolution(isx);
-        if (useJointVelLowPassFilter) {
-            outjointVelFilt(estSize, isx) = jointVelocitiesSolutionFiltered(isx);
-        }
     }
 
     fixedFrame.conservativeResize(estSize+1);
@@ -2590,40 +2515,19 @@ bool HumanKinematicEstimator::impl::solveIntegrationBasedInverseKinematics()
         }
     }
 
-//     lowPassFilterJointVelocities();
-
     // VELOCITY INTEGRATION
     // integrate velocities measurements
     if (!useDirectBaseMeasurement) {
-
-        if (useJointVelLowPassFilter)
-        {
-            stateIntegrator.integrate(jointVelocitiesSolutionFiltered,
-                                      baseVelocitySolution.getLinearVec3(),
-                                      baseVelocitySolution.getAngularVec3(),
-                                      dt);
-        }
-        else
-        {
-            stateIntegrator.integrate(jointVelocitiesSolution,
-                                      baseVelocitySolution.getLinearVec3(),
-                                      baseVelocitySolution.getAngularVec3(),
-                                      dt);
-        }
+        stateIntegrator.integrate(jointVelocitiesSolution,
+                                    baseVelocitySolution.getLinearVec3(),
+                                    baseVelocitySolution.getAngularVec3(),
+                                    dt);
 
         stateIntegrator.getJointConfiguration(jointConfigurationSolution);
         stateIntegrator.getBasePose(baseTransformSolution);
     }
     else {
-        if (useJointVelLowPassFilter)
-        {
-            stateIntegrator.integrate(jointVelocitiesSolution, dt);
-        }
-        else
-        {
-            stateIntegrator.integrate(jointVelocitiesSolutionFiltered, dt);
-        }
-
+        stateIntegrator.integrate(jointVelocitiesSolutionFiltered, dt);
         stateIntegrator.getJointConfiguration(jointConfigurationSolution);
     }
     return true;
