@@ -225,7 +225,6 @@ public:
     bool useDirectBaseMeasurement;
     bool useFixedBase;
 
-    iDynTree::InverseKinematics globalIK;
     InverseVelocityKinematics inverseVelocityKinematics;
     iDynTreeHelper::State::integrator stateIntegrator;
 
@@ -246,10 +245,6 @@ public:
     // solver initialization and update
     bool initializeIntegrationBasedInverseKinematicsSolver();
     bool solveIntegrationBasedInverseKinematics();
-
-    // optimization targets
-    bool updateInverseKinematicTargets();
-    bool addInverseKinematicTargets();
 
     bool updateInverseVelocityKinematicTargets();
     bool addInverseVelocityKinematicsTargets();
@@ -1151,11 +1146,11 @@ void HumanKinematicEstimator::run()
     pImpl->setSchmittTriggerInputsUsingHumanWrenches();
 
     // overwrite base related measurements with external base estimator
-    if (pImpl->m_extEstimatorInitialized)
-    {
-        pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
-        pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
-    }
+//     if (pImpl->m_extEstimatorInitialized)
+//     {
+//         pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
+//         pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
+//     }
 
     // Solve Inverse Kinematics and Inverse Velocity Problems
     auto tick = std::chrono::high_resolution_clock::now();
@@ -2055,86 +2050,6 @@ bool HumanKinematicEstimator::impl::solveIntegrationBasedInverseKinematics()
     else {
         stateIntegrator.integrate(jointVelocitiesSolutionFiltered, dt);
         stateIntegrator.getJointConfiguration(jointConfigurationSolution);
-    }
-    return true;
-}
-
-bool HumanKinematicEstimator::impl::updateInverseKinematicTargets()
-{
-    iDynTree::Transform linkTransform;
-
-    for (size_t linkIndex = 0; linkIndex < humanModel.getNrOfLinks(); ++linkIndex) {
-        std::string linkName = humanModel.getLinkName(linkIndex);
-
-        // Skip links with no associated measures (use only links from the configuration)
-        if (wearableStorage.modelToWearable_LinkName.find(linkName)
-            == wearableStorage.modelToWearable_LinkName.end()) {
-            continue;
-        }
-
-        // For the link used as base insert both the rotation and position cost if not using direcly
-        // base measurements and the base is not fixed.
-        if (linkName == floatingBaseFrame) {
-            if (!(useDirectBaseMeasurement || useFixedBase)) {
-                if (!globalIK.updateTarget(linkName, linkTransformMatrices.at(linkName), 1.0, 1.0)) {
-                    yError() << LogPrefix << "Failed to update target for floating base" << linkName;
-                    return false;
-                }
-            }
-            continue;
-        }
-
-        if (linkTransformMatrices.find(linkName) == linkTransformMatrices.end()) {
-            yError() << LogPrefix << "Failed to find transformation matrix for link" << linkName;
-            return false;
-        }
-
-        linkTransform = linkTransformMatrices.at(linkName);
-        // if useDirectBaseMeasurement, use the link transform relative to the base
-        if (useDirectBaseMeasurement) {
-            linkTransform =
-                linkTransformMatrices.at(floatingBaseFrame).inverse() * linkTransform;
-        }
-
-        if (!globalIK.updateTarget(linkName, linkTransform, posTargetWeight, rotTargetWeight)) {
-            yError() << LogPrefix << "Failed to update target for link" << linkName;
-            return false;
-        }
-    }
-    return true;
-}
-
-bool HumanKinematicEstimator::impl::addInverseKinematicTargets()
-{
-    for (size_t linkIndex = 0; linkIndex < humanModel.getNrOfLinks(); ++linkIndex) {
-        std::string linkName = humanModel.getLinkName(linkIndex);
-
-        // Skip the fake links
-        if (wearableStorage.modelToWearable_LinkName.find(linkName)
-            == wearableStorage.modelToWearable_LinkName.end()) {
-            continue;
-        }
-
-        // Insert in the cost the rotation and position of the link used as base, or add it as a target
-        if (linkName == floatingBaseFrame) {
-            if ((useDirectBaseMeasurement || useFixedBase )
-                     && !globalIK.addFrameConstraint(linkName, iDynTree::Transform::Identity())) {
-                yError() << LogPrefix << "Failed to add constraint for base link" << linkName;
-                return false;
-            }
-            else if (!globalIK.addTarget(linkName, iDynTree::Transform::Identity(), 1.0, 1.0)) {
-                yError() << LogPrefix << "Failed to add target for floating base link" << linkName;
-                return false;
-            }
-            continue;
-        }
-
-        // Add ik targets and set to identity
-        if (!globalIK.addTarget(
-                linkName, iDynTree::Transform::Identity(), posTargetWeight, rotTargetWeight)) {
-            yError() << LogPrefix << "Failed to add target for link" << linkName;
-            return false;
-        }
     }
     return true;
 }

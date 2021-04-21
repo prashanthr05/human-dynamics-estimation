@@ -43,7 +43,7 @@
         <param name="linVelTargetWeight">0.0</param>
         <param name="angVelTargetWeight">1.0</param>
         <!-- integration based IK parameters -->
-        <param name='integrationBasedJointVelocityLimit'>7.0</param> <!-- comment or -1.0 for no limits -->
+        <param name='integrationBasedJointVelocityLimit'>10.0</param> <!-- comment or -1.0 for no limits -->
         <param name="integrationBasedIKMeasuredVelocityGainLinRot">(1.0 1.0)</param>
         <param name="integrationBasedIKCorrectionGainsLinRot">(8.0 20.0)</param>
         <param name="integrationBasedIKIntegralCorrectionGainsLinRot">(0.0 0.0)</param>
@@ -125,7 +125,7 @@
         <param name="outputPort">/HDE/HumanStateWrapper/state:o</param>
         <action phase="startup" level="5" type="attach">
             <paramlist name="networks">
-                <elem name="HumanStateWrapperLabel">HumanStateProvider</elem>
+                <elem name="HumanStateWrapperLabel">HumanKinematicEstimator</elem>
             </paramlist>
         </action>
         <action phase="shutdown" level="5" type="detach"/>
@@ -137,7 +137,7 @@
         <param name="humanJointsTopic">/Human/joint_states</param>
         <action phase="startup" level="5" type="attach">
             <paramlist name="networks">
-                <elem name="HumanStatePublisherLabel">HumanStateProvider</elem>
+                <elem name="HumanStatePublisherLabel">HumanKinematicEstimator</elem>
             </paramlist>
         </action>
         <action phase="shutdown" level="5" type="detach"/>
