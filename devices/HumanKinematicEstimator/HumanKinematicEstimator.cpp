@@ -140,7 +140,6 @@ public:
     hde::interfaces::IHumanWrench* iHumanWrench = nullptr;
 
     bool allowIKFailures;
-    bool useXsensJointsAngles;
 
     float period;
     mutable std::mutex mutex;
@@ -238,7 +237,6 @@ public:
     iDynTree::Vector3 worldGravity;
 
     // get input data
-    bool getJointAnglesFromInputData(iDynTree::VectorDynSize& jointAngles);
     bool getLinkTransformFromInputData(std::unordered_map<std::string, iDynTree::Transform>& t);
     bool getLinkVelocityFromInputData(std::unordered_map<std::string, iDynTree::Twist>& t);
 
@@ -428,11 +426,6 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
         return false;
     }
 
-    if (!(config.check("useXsensJointsAngles") && config.find("useXsensJointsAngles").isBool())) {
-        yError() << LogPrefix << "useXsensJointsAngles option not found or not valid";
-        return false;
-    }
-
     std::string baseFrameName;
     if(config.check("floatingBaseFrame") && config.find("floatingBaseFrame").isList() ) {
               baseFrameName = config.find("floatingBaseFrame").asList()->get(0).asString();
@@ -495,7 +488,6 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
         return false;
     }
 
-    pImpl->useXsensJointsAngles = config.find("useXsensJointsAngles").asBool();
     const std::string urdfFileName = config.find("urdf").asString();
     pImpl->floatingBaseFrame = baseFrameName;
     pImpl->period = config.check("period", yarp::os::Value(DefaultPeriod)).asFloat64();
@@ -515,84 +507,6 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
     // ==========================================
     // PARSE THE DEPENDENDT CONFIGURATION OPTIONS
     // ==========================================
-
-    if (pImpl->useXsensJointsAngles) {
-        yarp::os::Bottle& jointsGroup = config.findGroup("MODEL_TO_DATA_JOINT_NAMES");
-        if (jointsGroup.isNull()) {
-            yError() << LogPrefix << "Failed to find group MODEL_TO_DATA_JOINT_NAMES";
-            return false;
-        }
-
-        for (size_t i = 1; i < jointsGroup.size(); ++i) {
-            if (!(jointsGroup.get(i).isList() && jointsGroup.get(i).asList()->size() == 2)) {
-                yError() << LogPrefix << "Childs of MODEL_TO_DATA_JOINT_NAMES must be lists";
-                return false;
-            }
-            yarp::os::Bottle* list = jointsGroup.get(i).asList();
-            std::string key = list->get(0).asString();
-            yarp::os::Bottle* listContent = list->get(1).asList();
-
-            if (!((listContent->size() == 3) && (listContent->get(0).isString())
-                  && (listContent->get(1).isString()) && (listContent->get(2).isInt()))) {
-                yError() << LogPrefix << "Joint list must have two strings and one integer";
-                return false;
-            }
-        }
-
-        for (size_t i = 1; i < jointsGroup.size(); ++i) {
-            yarp::os::Bottle* listContent = jointsGroup.get(i).asList()->get(1).asList();
-
-            std::string modelJointName = listContent->get(0).asString();
-            std::string wearableJointName = listContent->get(1).asString();
-            size_t wearableJointComponent = listContent->get(2).asInt();
-
-            yInfo() << LogPrefix << "Read joint map:" << modelJointName << "==> ("
-                    << wearableJointName << "," << wearableJointComponent << ")";
-            pImpl->wearableStorage.modelToWearable_JointInfo[modelJointName] = {
-                wearableJointName, wearableJointComponent};
-        }
-    }
-
-    if (pImpl->ikSolver == SolverIK::pairwised || pImpl->ikSolver == SolverIK::global) {
-        if (!(config.check("allowIKFailures") && config.find("allowIKFailures").isBool())) {
-            yError() << LogPrefix << "allowFailures option not found or not valid";
-            return false;
-        }
-        if (!(config.check("maxIterationsIK") && config.find("maxIterationsIK").isInt())) {
-            yError() << LogPrefix << "maxIterationsIK option not found or not valid";
-            return false;
-        }
-
-        if (!(config.check("costTolerance") && config.find("costTolerance").isFloat64())) {
-            yError() << LogPrefix << "costTolerance option not found or not valid";
-            return false;
-        }
-        if (!(config.check("ikLinearSolver") && config.find("ikLinearSolver").isString())) {
-            yError() << LogPrefix << "ikLinearSolver option not found or not valid";
-            return false;
-        }
-        if (!(config.check("posTargetWeight") && config.find("posTargetWeight").isFloat64())) {
-            yError() << LogPrefix << "posTargetWeight option not found or not valid";
-            return false;
-        }
-
-        if (!(config.check("rotTargetWeight") && config.find("rotTargetWeight").isFloat64())) {
-            yError() << LogPrefix << "rotTargetWeight option not found or not valid";
-            return false;
-        }
-        if (!(config.check("costRegularization") && config.find("costRegularization").isDouble())) {
-            yError() << LogPrefix << "costRegularization option not found or not valid";
-            return false;
-        }
-
-        pImpl->allowIKFailures = config.find("allowIKFailures").asBool();
-        pImpl->maxIterationsIK = config.find("maxIterationsIK").asInt();
-        pImpl->costTolerance = config.find("costTolerance").asFloat64();
-        pImpl->linearSolverName = config.find("ikLinearSolver").asString();
-        pImpl->posTargetWeight = config.find("posTargetWeight").asFloat64();
-        pImpl->rotTargetWeight = config.find("rotTargetWeight").asFloat64();
-        pImpl->costRegularization = config.find("costRegularization").asDouble();
-    }
 
     if (pImpl->ikSolver == SolverIK::global || pImpl->ikSolver == SolverIK::integrationbased) {
         if (!(config.check("useDirectBaseMeasurement")
@@ -696,8 +610,6 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
     yInfo() << LogPrefix << "*** Period                            :" << pImpl->period;
     yInfo() << LogPrefix << "*** Urdf file name                    :" << urdfFileName;
     yInfo() << LogPrefix << "*** Ik solver                         :" << solverName;
-    yInfo() << LogPrefix
-            << "*** Use Xsens joint angles            :" << pImpl->useXsensJointsAngles;
     yInfo() << LogPrefix
             << "*** Use Directly base measurement    :" << pImpl->useDirectBaseMeasurement;
     if (pImpl->ikSolver == SolverIK::pairwised || pImpl->ikSolver == SolverIK::global) {
@@ -1744,52 +1656,6 @@ bool HumanKinematicEstimator::impl::getLinkVelocityFromInputData(
     return true;
 }
 
-bool HumanKinematicEstimator::impl::getJointAnglesFromInputData(iDynTree::VectorDynSize& jointAngles)
-{
-    for (const auto& jointMapEntry : wearableStorage.modelToWearable_JointInfo) {
-        const ModelJointName& modelJointName = jointMapEntry.first;
-        const WearableJointInfo& wearableJointInfo = jointMapEntry.second;
-
-        if (wearableStorage.jointSensorsMap.find(wearableJointInfo.name)
-                == wearableStorage.jointSensorsMap.end()
-            || !wearableStorage.jointSensorsMap.at(wearableJointInfo.name)) {
-            yError() << LogPrefix << "Failed to get" << wearableJointInfo.name
-                     << "sensor from the device. Something happened after configuring it.";
-            return false;
-        }
-
-        const wearable::SensorPtr<const sensor::IVirtualSphericalJointKinSensor> sensor =
-            wearableStorage.jointSensorsMap.at(wearableJointInfo.name);
-
-        if (!sensor) {
-            yError() << LogPrefix << "Sensor" << wearableJointInfo.name
-                     << "has been added but not properly configured";
-            return false;
-        }
-
-        if (sensor->getSensorStatus() != sensor::SensorStatus::Ok) {
-            yError() << LogPrefix << "The sensor status of " << sensor->getSensorName()
-                     << " is not ok (" << static_cast<double>(sensor->getSensorStatus()) << ")";
-            return false;
-        }
-
-        Vector3 anglesXYZ;
-        if (!sensor->getJointAnglesAsRPY(anglesXYZ)) {
-            yError() << LogPrefix << "Failed to read joint angles from virtual joint sensor";
-            return false;
-        }
-
-        // Since anglesXYZ describes a spherical joint, take the right component
-        // (specified in the configuration file)
-        // TODO: we still need to validate the Xsens convention. Particularly, the zeros of
-        //       the joint angles might be different.
-        jointAngles.setVal(humanModel.getJointIndex(modelJointName),
-                           anglesXYZ[wearableJointInfo.index]);
-    }
-
-    return true;
-}
-
 bool HumanKinematicEstimator::impl::initializeIntegrationBasedInverseKinematicsSolver()
 {
     // Initialize state integrator
@@ -2238,43 +2104,6 @@ bool HumanKinematicEstimator::attach(yarp::dev::PolyDriver* poly)
             // Create a sensor map entry using the wearable sensor name as key
             pImpl->wearableStorage.linkSensorsMap[wearableLinkName] =
                 pImpl->iWear->getVirtualLinkKinSensor(wearableLinkName);
-        }
-
-        // ============
-        // CHECK JOINTS
-        // ============
-
-        if (pImpl->useXsensJointsAngles) {
-            yDebug() << "Checking joints";
-
-            for (size_t jointIndex = 0; jointIndex < pImpl->humanModel.getNrOfDOFs(); ++jointIndex) {
-                // Get the name of the joint from the model and its prefix from iWear
-                std::string modelJointName = pImpl->humanModel.getJointName(jointIndex);
-
-                // Urdfs don't have support of spherical joints, IWear instead does.
-                // We use the configuration for addressing this mismatch.
-                if (pImpl->wearableStorage.modelToWearable_JointInfo.find(modelJointName)
-                    == pImpl->wearableStorage.modelToWearable_JointInfo.end()) {
-                    yWarning() << LogPrefix << "Failed to find" << modelJointName
-                            << "entry in the configuration map. Skipping this joint.";
-                    continue;
-                }
-
-                // Get the name of the sensor associate to the joint
-                std::string wearableJointName =
-                    pImpl->wearableStorage.modelToWearable_JointInfo.at(modelJointName).name;
-
-                // Try to get the sensor
-                auto sensor = pImpl->iWear->getVirtualSphericalJointKinSensor(wearableJointName);
-                if (!sensor) {
-                    yError() << LogPrefix << "Failed to find sensor associated with joint"
-                            << wearableJointName << "from the IWear interface";
-                    return false;
-                }
-
-                // Create a sensor map entry using the wearable sensor name as key
-                pImpl->wearableStorage.jointSensorsMap[wearableJointName] = sensor;
-            }
         }
     }
 
