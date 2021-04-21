@@ -40,11 +40,6 @@
 
 #include "Utils.hpp"
 
-static bool getReducedModel(const iDynTree::Model& modelInput,
-                            const std::string& parentFrame,
-                            const std::string& endEffectorFrame,
-                            iDynTree::Model& modelOutput);
-
 const std::string DeviceName = "HumanKinematicEstimator";
 const std::string LogPrefix = DeviceName + " :";
 constexpr double DefaultPeriod = 0.01;
@@ -2434,68 +2429,4 @@ std::array<double, 3> HumanKinematicEstimator::getCoMVelocity() const
 {
     std::lock_guard<std::mutex> lock(pImpl->mutex);
     return pImpl->solution.CoMVelocity;
-}
-
-static bool getReducedModel(const iDynTree::Model& modelInput,
-                            const std::string& parentFrame,
-                            const std::string& endEffectorFrame,
-                            iDynTree::Model& modelOutput)
-{
-    iDynTree::FrameIndex parentFrameIndex;
-    iDynTree::FrameIndex endEffectorFrameIndex;
-    std::vector<std::string> consideredJoints;
-    iDynTree::Traversal traversal;
-    iDynTree::LinkIndex parentLinkIdx;
-    iDynTree::IJointConstPtr joint;
-    iDynTree::ModelLoader loader;
-
-    // Get frame indices
-    parentFrameIndex = modelInput.getFrameIndex(parentFrame);
-    endEffectorFrameIndex = modelInput.getFrameIndex(endEffectorFrame);
-
-    if (parentFrameIndex == iDynTree::FRAME_INVALID_INDEX) {
-        yError() << LogPrefix << " Invalid parent frame: " << parentFrame;
-        return false;
-    }
-    else if (endEffectorFrameIndex == iDynTree::FRAME_INVALID_INDEX) {
-        yError() << LogPrefix << " Invalid End Effector Frame: " << endEffectorFrame;
-        return false;
-    }
-
-    // Select joint from traversal
-    modelInput.computeFullTreeTraversal(traversal, modelInput.getFrameLink(parentFrameIndex));
-
-    iDynTree::LinkIndex visitedLink = modelInput.getFrameLink(endEffectorFrameIndex);
-
-    while (visitedLink != traversal.getBaseLink()->getIndex()) {
-        parentLinkIdx = traversal.getParentLinkFromLinkIndex(visitedLink)->getIndex();
-        joint = traversal.getParentJointFromLinkIndex(visitedLink);
-
-        // Check if the joint is supported
-        if (modelInput.getJoint(joint->getIndex())->getNrOfDOFs() == 1) {
-            consideredJoints.insert(consideredJoints.begin(),
-                                    modelInput.getJointName(joint->getIndex()));
-        }
-        else {
-            yWarning() << LogPrefix << "Joint " << modelInput.getJointName(joint->getIndex())
-                       << " is ignored as it has ("
-                       << modelInput.getJoint(joint->getIndex())->getNrOfDOFs() << " DOFs)";
-        }
-
-        visitedLink = parentLinkIdx;
-    }
-
-    if (!loader.loadReducedModelFromFullModel(modelInput, consideredJoints)) {
-        yWarning() << LogPrefix << " failed to select joints: ";
-        for (std::vector<std::string>::const_iterator i = consideredJoints.begin();
-             i != consideredJoints.end();
-             ++i) {
-            yWarning() << *i << ' ';
-        }
-        return false;
-    }
-
-    modelOutput = loader.model();
-
-    return true;
 }
