@@ -142,6 +142,7 @@ struct Loggable
     Eigen::MatrixXd linkPos, linkRot, linkLinVel, linkAngVel;
     Eigen::MatrixXd outjointPos, outjointVel, outjointVelFilt;
     Eigen::VectorXd fixedFrame;
+    Eigen::MatrixXd lfCoP, rfCoP;
 };
 
 class HumanKinematicEstimator::impl
@@ -268,6 +269,7 @@ public:
     // external base estimator and contact detector
     std::unique_ptr<BipedalLocomotion::Estimators::LeggedOdometry> extLeggedOdom;
     std::unique_ptr<BipedalLocomotion::Contacts::SchmittTriggerDetector> extSchmitt;
+
     std::shared_ptr<iDynTree::KinDynComputations> extKinDyn;
     BaseState baseState{BaseState::external};
     bool m_extEstimatorInitialized{false};
@@ -277,10 +279,13 @@ public:
     double flatContactPlaneInclinationRoll, flatContactPlaneInclinationPitch;
     double flatContactPlaneHeight;
     std::string leftFootString{"LeftFoot"}, rightFootString{"RightFoot"};
+//     std::string leftFootFTShoe{"FTShoeLeft"}, rightFootFTShoe{"FTShoeRight"};
+    std::string leftFootFTShoe{"iFeelSuit::ft6D::Node#1"}, rightFootFTShoe{"iFeelSuit::ft6D::Node#2"};
 
     iDynTree::Transform loPose;
     iDynTree::Twist loTwist;
 
+    std::array<double, 2> leftFootCoP, rightFootCoP;
     // log data
     Loggable log;
 
@@ -655,30 +660,54 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
         return false;
     }
 
+//     std::vector<std::string> jointList{"jL5S1_rotx",
+//                                        "jRightHip_rotx",
+//                                        "jLeftHip_rotx" ,"jLeftHip_roty" ,"jLeftHip_rotz",
+//                                        "jLeftKnee_rotx" ,"jLeftKnee_roty", "jLeftKnee_rotz",
+//                                        "jLeftAnkle_rotx", "jLeftAnkle_roty", "jLeftAnkle_rotz",
+//                                        "jLeftBallFoot_rotx", "jLeftBallFoot_roty", "jLeftBallFoot_rotz",
+//                                        "jRightHip_roty", "jRightHip_rotz",
+//                                        "jRightKnee_rotx", "jRightKnee_roty", "jRightKnee_rotz",
+//                                        "jRightAnkle_rotx", "jRightAnkle_roty", "jRightAnkle_rotz",
+//                                        "jRightBallFoot_rotx", "jRightBallFoot_roty", "jRightBallFoot_rotz",
+//                                        "jL5S1_roty", "jL5S1_rotz", "jL4L3_rotx", "jL4L3_roty", "jL4L3_rotz",
+//                                        "jL1T12_rotx", "jL1T12_roty", "jL1T12_rotz",
+//                                        "jT9T8_rotx", "jT9T8_roty", "jT9T8_rotz",
+//                                        "jLeftC7Shoulder_rotx", "jT1C7_rotx",
+//                                        "jRightC7Shoulder_rotx", "jRightC7Shoulder_roty", "jRightC7Shoulder_rotz",
+//                                        "jRightShoulder_rotx", "jRightShoulder_roty", "jRightShoulder_rotz",
+//                                        "jRightElbow_rotx", "jRightElbow_roty", "jRightElbow_rotz",
+//                                        "jRightWrist_rotx", "jRightWrist_roty", "jRightWrist_rotz",
+//                                        "jT1C7_roty", "jT1C7_rotz",
+//                                        "jC1Head_rotx", "jC1Head_roty", "jC1Head_rotz",
+//                                        "jLeftC7Shoulder_roty", "jLeftC7Shoulder_rotz",
+//                                        "jLeftShoulder_rotx", "jLeftShoulder_roty", "jLeftShoulder_rotz",
+//                                        "jLeftElbow_rotx", "jLeftElbow_roty", "jLeftElbow_rotz",
+//                                        "jLeftWrist_rotx", "jLeftWrist_roty", "jLeftWrist_rotz" };
+
     std::vector<std::string> jointList{"jL5S1_rotx",
                                        "jRightHip_rotx",
                                        "jLeftHip_rotx" ,"jLeftHip_roty" ,"jLeftHip_rotz",
-                                       "jLeftKnee_rotx" ,"jLeftKnee_roty", "jLeftKnee_rotz",
+                                       "jLeftKnee_roty", "jLeftKnee_rotz",
                                        "jLeftAnkle_rotx", "jLeftAnkle_roty", "jLeftAnkle_rotz",
-                                       "jLeftBallFoot_rotx", "jLeftBallFoot_roty", "jLeftBallFoot_rotz",
+                                       "jLeftBallFoot_roty",
                                        "jRightHip_roty", "jRightHip_rotz",
-                                       "jRightKnee_rotx", "jRightKnee_roty", "jRightKnee_rotz",
+                                       "jRightKnee_roty", "jRightKnee_rotz",
                                        "jRightAnkle_rotx", "jRightAnkle_roty", "jRightAnkle_rotz",
-                                       "jRightBallFoot_rotx", "jRightBallFoot_roty", "jRightBallFoot_rotz",
-                                       "jL5S1_roty", "jL5S1_rotz", "jL4L3_rotx", "jL4L3_roty", "jL4L3_rotz",
-                                       "jL1T12_rotx", "jL1T12_roty", "jL1T12_rotz",
+                                       "jRightBallFoot_roty",
+                                       "jL5S1_roty", "jL4L3_rotx", "jL4L3_roty",
+                                       "jL1T12_rotx", "jL1T12_roty",
                                        "jT9T8_rotx", "jT9T8_roty", "jT9T8_rotz",
                                        "jLeftC7Shoulder_rotx", "jT1C7_rotx",
-                                       "jRightC7Shoulder_rotx", "jRightC7Shoulder_roty", "jRightC7Shoulder_rotz",
+                                       "jRightC7Shoulder_rotx",
                                        "jRightShoulder_rotx", "jRightShoulder_roty", "jRightShoulder_rotz",
-                                       "jRightElbow_rotx", "jRightElbow_roty", "jRightElbow_rotz",
-                                       "jRightWrist_rotx", "jRightWrist_roty", "jRightWrist_rotz",
+                                       "jRightElbow_roty", "jRightElbow_rotz",
+                                       "jRightWrist_rotx", "jRightWrist_rotz",
                                        "jT1C7_roty", "jT1C7_rotz",
-                                       "jC1Head_rotx", "jC1Head_roty", "jC1Head_rotz",
-                                       "jLeftC7Shoulder_roty", "jLeftC7Shoulder_rotz",
+                                       "jC1Head_rotx", "jC1Head_roty",
                                        "jLeftShoulder_rotx", "jLeftShoulder_roty", "jLeftShoulder_rotz",
-                                       "jLeftElbow_rotx", "jLeftElbow_roty", "jLeftElbow_rotz",
-                                       "jLeftWrist_rotx", "jLeftWrist_roty", "jLeftWrist_rotz" };
+                                       "jLeftElbow_roty", "jLeftElbow_rotz",
+                                       "jLeftWrist_rotx", "jLeftWrist_rotz" };
 
     iDynTree::ModelLoader modelLoader;
     if (!modelLoader.loadReducedModelFromFile(urdfFilePath, jointList) || !modelLoader.isValid()) {
@@ -1080,7 +1109,7 @@ void HumanKinematicEstimator::impl::setSchmittTriggerInputsUsingHumanWrenches()
                       iHumanWrench->getWrenches().at(6 * wrenchSourcesIdx+5);
             double norm{force.norm()};
 
-            if (iHumanWrench->getWrenchSourceNames().at(wrenchSourcesIdx) == "FTShoeLeft")
+            if (iHumanWrench->getWrenchSourceNames().at(wrenchSourcesIdx) == leftFootFTShoe)
             {
                 Eigen::Matrix3d Rw = iDynTree::toEigen(kinDynComputations->getWorldTransform(leftFootString).getRotation());
                 Eigen::Vector3d f = Rw.transpose()*force;
@@ -1088,18 +1117,26 @@ void HumanKinematicEstimator::impl::setSchmittTriggerInputsUsingHumanWrenches()
                                                  yarp::os::Time::now(),
                                                  f(2));
 
+                if (force(2) > 1e-1)
+                {
+                    leftFootCoP[0] = -torque(1)/force(2); // -tau_{y}/f_{z}
+                    leftFootCoP[1] = torque(0)/force(2); // tau_{x}/f_{z}
+                    yInfo() << "left foot cop: (" << leftFootCoP[0] << ", " << leftFootCoP[1] << ")";
+                }
+
                 if (m_extEstimatorInitialized)
                 {
                     auto size = log.lfForce.size();
                     log.lfForce.conservativeResize(size+1);
                     log.lfForce(size) = f(2);
                     log.lfWrench.conservativeResize(size+1, 6);
-                    log.lfWrench.row(size) << force, torque;
-
+                    log.lfWrench.row(size) << force(0), force(1), force(2), torque(0), torque(1), torque(2);
+                    log.lfCoP.conservativeResize(size+1, 2);
+                    log.lfCoP.row(size) << leftFootCoP[0], leftFootCoP[1];
                 }
             }
 
-            if (iHumanWrench->getWrenchSourceNames().at(wrenchSourcesIdx) == "FTShoeRight")
+            if (iHumanWrench->getWrenchSourceNames().at(wrenchSourcesIdx) == rightFootFTShoe)
             {
                 Eigen::Matrix3d Rw = iDynTree::toEigen(kinDynComputations->getWorldTransform(rightFootString).getRotation());
                 Eigen::Vector3d f = Rw.transpose()*force;
@@ -1107,13 +1144,23 @@ void HumanKinematicEstimator::impl::setSchmittTriggerInputsUsingHumanWrenches()
                                                  yarp::os::Time::now(),
                                                   f(2));
 
+                if (force(2) > 1e-1)
+                {
+                    rightFootCoP[0] = -torque(1)/force(2); // -tau_{y}/f_{z}
+                    rightFootCoP[1] = torque(0)/force(2); // tau_{x}/f_{z}
+                    yInfo() << "right foot cop: (" << rightFootCoP[0] << ", " << rightFootCoP[1] << ")";
+                }
+
+
                 if (m_extEstimatorInitialized)
                 {
                     auto size = log.rfForce.size();
                     log.rfForce.conservativeResize(size+1);
                     log.rfForce(size) = f(2);
                     log.rfWrench.conservativeResize(size+1, 6);
-                    log.rfWrench.row(size) << force, torque;
+                    log.rfWrench.row(size) << force(0), force(1), force(2), torque(0), torque(1), torque(2);
+                    log.rfCoP.conservativeResize(size+1, 2);
+                    log.rfCoP.row(size) << rightFootCoP[0], rightFootCoP[1];
                 }
             }
         }
@@ -1147,11 +1194,11 @@ void HumanKinematicEstimator::run()
     pImpl->setSchmittTriggerInputsUsingHumanWrenches();
 
     // overwrite base related measurements with external base estimator
-//     if (pImpl->m_extEstimatorInitialized)
-//     {
+    if (pImpl->m_extEstimatorInitialized)
+    {
 //         pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
 //         pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
-//     }
+    }
 
     // Solve Inverse Kinematics and Inverse Velocity Problems
     auto tick = std::chrono::high_resolution_clock::now();
@@ -1328,7 +1375,6 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
         return false;
     }
 
-
     Eigen::Quaterniond qB = Eigen::Quaterniond(baseTransformSolution.getRotation().asQuaternion()(0),
                                                baseTransformSolution.getRotation().asQuaternion()(1),
                                                baseTransformSolution.getRotation().asQuaternion()(2),
@@ -1449,10 +1495,10 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
     log.extLinVel.row(estSize) << out.baseTwist(0), out.baseTwist(1), out.baseTwist(2);
     log.extAngVel.row(estSize) << out.baseTwist(3), out.baseTwist(4), out.baseTwist(5);
 
-    auto w_H_b = linkTransformMatricesRaw.at("Pelvis");
+    auto w_H_b = linkTransformMatrices.at("Pelvis");
 
-    auto pOut = linkTransformMatricesRaw.at("Pelvis").getPosition();
-    auto rpyOut = linkTransformMatricesRaw.at("Pelvis").getRotation().asRPY();
+    auto pOut = w_H_b.getPosition();
+    auto rpyOut = w_H_b.getRotation().asRPY();
     auto baseTwist = linkVelocities.at("Pelvis");
     log.linkPos.conservativeResize(estSize+1, 3);
     log.linkRot.conservativeResize(estSize+1, 3);
@@ -1494,7 +1540,7 @@ bool HumanKinematicEstimator::impl::initializeEstimatorWorld()
 {
     if (!m_extEstimatorInitialized)
     {
-        auto b_H_w =  linkTransformMatricesRaw.at("Pelvis").inverse(); //baseTransformSolution
+        auto b_H_w =  baseTransformSolution.inverse();
 
         auto quat = b_H_w.getRotation().asQuaternion();
         if (!extLeggedOdom->resetEstimator("Pelvis",
@@ -1569,6 +1615,13 @@ bool HumanKinematicEstimator::impl::logData()
                                                       {static_cast<std::size_t>(log.rfWrench.rows()), static_cast<std::size_t>(log.rfWrench.cols())},
                                                       log.rfWrench.data()};
 
+    matioCpp::MultiDimensionalArray<double> outlfCoP{"lfCoP",
+                                                      {static_cast<std::size_t>(log.lfCoP.rows()), static_cast<std::size_t>(log.lfCoP.cols())},
+                                                      log.lfCoP.data()};
+    matioCpp::MultiDimensionalArray<double> outrfCoP{"rfCoP",
+                                                      {static_cast<std::size_t>(log.rfCoP.rows()), static_cast<std::size_t>(log.rfCoP.cols())},
+                                                      log.rfCoP.data()};
+
     auto outContactlf = BipedalLocomotion::Conversions::tomatioCpp(log.lfContact, "estLFContact");
     auto outContactrf = BipedalLocomotion::Conversions::tomatioCpp(log.rfContact, "estRFContact");
     auto outlfForceZ = BipedalLocomotion::Conversions::tomatioCpp(log.lfForce, "LFForceZ");
@@ -1610,6 +1663,9 @@ bool HumanKinematicEstimator::impl::logData()
     write_ok = write_ok && file.write(outBaseLinkRot);
     write_ok = write_ok && file.write(outBaseLinkLinVel);
     write_ok = write_ok && file.write(outBaseLinkAngVel);
+
+    write_ok = write_ok && file.write(outlfCoP);
+    write_ok = write_ok && file.write(outrfCoP);
 
     if (!write_ok)
     {
@@ -1996,14 +2052,6 @@ bool HumanKinematicEstimator::impl::solveIntegrationBasedInverseKinematics()
                     - integrationBasedIKIntegralAngularCorrectionGain
                           * integralOrientationError.getVal(i - 3));
         }
-
-//         if (linkName == floatingBaseFrame && m_extEstimatorInitialized)
-//         {
-//             for (int idx = 0; idx < 3; idx++) {
-//                 linkVelocities[linkName](idx) = baseVelocitySolution(idx);
-//             }
-//
-//         }
     }
 
     // INVERSE VELOCITY KINEMATICS
