@@ -1195,14 +1195,14 @@ bool HumanStateProvider::open(yarp::os::Searchable& config)
     // INITIALIZE EXTERNAL BASE ESTIMATOR
     // ==================================
 
-    if (pImpl->baseState == BaseState::external) {
-        if (!pImpl->setupExternalBaseEstimator(config)) {
-            return false;
-        }
-        if (!pImpl->setupExternalContactDetector(config)) {
-            return false;
-        }
-    }
+//     if (pImpl->baseState == BaseState::external) {
+//         if (!pImpl->setupExternalBaseEstimator(config)) {
+//             return false;
+//         }
+//         if (!pImpl->setupExternalContactDetector(config)) {
+//             return false;
+//         }
+//     }
 
     // ===================
     // INITIALIZE RPC PORT
@@ -1342,11 +1342,11 @@ void HumanStateProvider::run()
     }
 
     // overwrite base related measurements with external base estimator
-    if (pImpl->m_extEstimatorInitialized)
-    {
-        pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
-        pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
-    }
+//     if (pImpl->m_extEstimatorInitialized)
+//     {
+//         pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
+//         pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
+//     }
 
     // if human-wrench provider is attached, retrieve the links wrenches
     if (pImpl->iHumanWrench)
@@ -1445,12 +1445,12 @@ void HumanStateProvider::run()
         pImpl->baseVelocitySolution = pImpl->linkVelocities.at(pImpl->floatingBaseFrame);
     }
 
-    if (pImpl->baseState == BaseState::external) {
-        bool baseEstimationFailure = !pImpl->updateExternalEstimatorAndDetector();
-        if (baseEstimationFailure) {
-            yWarning() << LogPrefix << "External base estimation failed, keeping the previous solution";
-        }
-    }
+//     if (pImpl->baseState == BaseState::external) {
+//         bool baseEstimationFailure = !pImpl->updateExternalEstimatorAndDetector();
+//         if (baseEstimationFailure) {
+//             yWarning() << LogPrefix << "External base estimation failed, keeping the previous solution";
+//         }
+//     }
 
     // CoM position and velocity
     std::array<double, 3> CoM_position, CoM_velocity;

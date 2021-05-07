@@ -90,8 +90,6 @@ struct SolutionIK
 
 enum SolverIK
 {
-    global,
-    pairwised,
     integrationbased
 };
 
@@ -105,14 +103,13 @@ enum rpcCommand
     calibrateRelativeLink,
     setRotationOffset,
     resetCalibration,
+    initializeExternalEstimatorWithWorld
 };
 
-enum class BaseState
+enum class ExternalBaseState
 {
-    standard, // not direct and not fixed base
-    direct,   // use base pose measurements from
-    fixed,    // fixed base pose
-    external  // base pose estimated by BipedalLocomotionFramework estimator
+    useAsState,
+    useAsMeasurement
 };
 
 // Container of data coming from the wearable interface
@@ -123,13 +120,10 @@ struct WearableStorage
     // E.g. [Pelvis] ==> [XsensSuit::vLink::Pelvis]. Read from the configuration.
     //
     std::unordered_map<ModelLinkName, WearableLinkName> modelToWearable_LinkName;
-    std::unordered_map<ModelJointName, WearableJointInfo> modelToWearable_JointInfo;
 
     // Maps [wearable virtual sensor name] ==> [virtual sensor]
     std::unordered_map<WearableLinkName, SensorPtr<const sensor::IVirtualLinkKinSensor>>
         linkSensorsMap;
-    std::unordered_map<WearableJointName, SensorPtr<const sensor::IVirtualSphericalJointKinSensor>>
-        jointSensorsMap;
 };
 
 struct Loggable
@@ -178,7 +172,7 @@ public:
     std::unordered_map<std::string, iDynTree::Twist> linkVelocities;
     iDynTree::VectorDynSize jointConfigurationSolution;
     iDynTree::VectorDynSize jointVelocitiesSolution;
-    iDynTree::VectorDynSize jointVelocitiesSolutionFiltered;
+
     iDynTree::Transform baseTransformSolution;
     iDynTree::Twist baseVelocitySolution;
 
@@ -261,7 +255,7 @@ public:
     // external base estimator and contact detector methods
     bool setupExternalBaseEstimator(yarp::os::Searchable& config);
     bool setupExternalContactDetector(yarp::os::Searchable& config);
-    bool initializeEstimatorWorld();
+    bool initializeEstimatorWorld(const std::string& reflinkName);
     void setSchmittTriggerInputsUsingHumanWrenches();
     bool updateExternalEstimatorAndDetector();
     bool logData();
@@ -271,15 +265,16 @@ public:
     std::unique_ptr<BipedalLocomotion::Contacts::SchmittTriggerDetector> extSchmitt;
 
     std::shared_ptr<iDynTree::KinDynComputations> extKinDyn;
-    BaseState baseState{BaseState::external};
+    ExternalBaseState baseState{ExternalBaseState::useAsState};
     bool m_extEstimatorInitialized{false};
     int itrCount{0};
     int initThresh{400};
 
     double flatContactPlaneInclinationRoll, flatContactPlaneInclinationPitch;
     double flatContactPlaneHeight;
-    std::string leftFootString{"LeftFoot"}, rightFootString{"RightFoot"};
-//     std::string leftFootFTShoe{"FTShoeLeft"}, rightFootFTShoe{"FTShoeRight"};
+
+    // @TODO add config parameters
+    std::string leftFootString{"LeftToe"}, rightFootString{"RightToe"};
     std::string leftFootFTShoe{"iFeelSuit::ft6D::Node#1"}, rightFootFTShoe{"iFeelSuit::ft6D::Node#2"};
 
     iDynTree::Transform loPose;
@@ -365,6 +360,12 @@ public:
                 this->parentLinkName = command.get(1).asString();
                 response.addString("Entered command <reset> is correct, trying to remove secondaty calibration for the link " + this->parentLinkName);
                 this->cmdStatus = rpcCommand::resetCalibration;
+            }
+            else if (command.get(0).asString() == "initializeExternalEstimator" && !command.get(1).isNull() ) {
+                this->parentLinkName = "";
+                this->refLinkName = command.get(1).asString();
+                response.addString("Entered command <initializeExternalEstimator> is correct, trying to initialize the external estimator with reference link" + this->refLinkName + " for the world.");
+                this->cmdStatus = rpcCommand::initializeExternalEstimatorWithWorld;
             }
             else {
                 response.addString(
@@ -479,11 +480,7 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
     // =======================================
 
     std::string solverName = config.find("ikSolver").asString();
-    if (solverName == "global")
-        pImpl->ikSolver = SolverIK::global;
-    else if (solverName == "pairwised")
-        pImpl->ikSolver = SolverIK::pairwised;
-    else if (solverName == "integrationbased")
+    if (solverName == "integrationbased")
         pImpl->ikSolver = SolverIK::integrationbased;
     else {
         yError() << LogPrefix << "ikSolver " << solverName << " not found";
@@ -510,7 +507,7 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
     // PARSE THE DEPENDENDT CONFIGURATION OPTIONS
     // ==========================================
 
-    if (pImpl->ikSolver == SolverIK::global || pImpl->ikSolver == SolverIK::integrationbased) {
+    if (pImpl->ikSolver == SolverIK::integrationbased) {
         if (!(config.check("useDirectBaseMeasurement")
               && config.find("useDirectBaseMeasurement").isBool())) {
             yError() << LogPrefix << "useDirectBaseMeasurement option not found or not valid";
@@ -1003,14 +1000,11 @@ bool HumanKinematicEstimator::open(yarp::os::Searchable& config)
     // ==================================
     // INITIALIZE EXTERNAL BASE ESTIMATOR
     // ==================================
-
-    if (pImpl->baseState == BaseState::external) {
-        if (!pImpl->setupExternalBaseEstimator(config)) {
-            return false;
-        }
-        if (!pImpl->setupExternalContactDetector(config)) {
-            return false;
-        }
+    if (!pImpl->setupExternalBaseEstimator(config)) {
+        return false;
+    }
+    if (!pImpl->setupExternalContactDetector(config)) {
+        return false;
     }
 
     // ===================
@@ -1121,7 +1115,6 @@ void HumanKinematicEstimator::impl::setSchmittTriggerInputsUsingHumanWrenches()
                 {
                     leftFootCoP[0] = -torque(1)/force(2); // -tau_{y}/f_{z}
                     leftFootCoP[1] = torque(0)/force(2); // tau_{x}/f_{z}
-                    yInfo() << "left foot cop: (" << leftFootCoP[0] << ", " << leftFootCoP[1] << ")";
                 }
 
                 if (m_extEstimatorInitialized)
@@ -1148,7 +1141,6 @@ void HumanKinematicEstimator::impl::setSchmittTriggerInputsUsingHumanWrenches()
                 {
                     rightFootCoP[0] = -torque(1)/force(2); // -tau_{y}/f_{z}
                     rightFootCoP[1] = torque(0)/force(2); // tau_{x}/f_{z}
-                    yInfo() << "right foot cop: (" << rightFootCoP[0] << ", " << rightFootCoP[1] << ")";
                 }
 
 
@@ -1194,10 +1186,10 @@ void HumanKinematicEstimator::run()
     pImpl->setSchmittTriggerInputsUsingHumanWrenches();
 
     // overwrite base related measurements with external base estimator
-    if (pImpl->m_extEstimatorInitialized)
+    if (pImpl->m_extEstimatorInitialized && pImpl->baseState == ExternalBaseState::useAsMeasurement)
     {
-//         pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
-//         pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
+        pImpl->linkTransformMatrices[pImpl->floatingBaseFrame].setPosition(pImpl->loPose.getPosition());
+        pImpl->linkVelocities[pImpl->floatingBaseFrame].setLinearVec3(pImpl->loTwist.getLinearVec3());
     }
 
     // Solve Inverse Kinematics and Inverse Velocity Problems
@@ -1235,11 +1227,15 @@ void HumanKinematicEstimator::run()
         pImpl->baseVelocitySolution = pImpl->linkVelocities.at(pImpl->floatingBaseFrame);
     }
 
-    if (pImpl->baseState == BaseState::external) {
-        bool baseEstimationFailure = !pImpl->updateExternalEstimatorAndDetector();
-        if (baseEstimationFailure) {
-            yWarning() << LogPrefix << "External base estimation failed, keeping the previous solution";
-        }
+    bool baseEstimationFailure = !pImpl->updateExternalEstimatorAndDetector();
+    if (baseEstimationFailure) {
+        yWarning() << LogPrefix << "External base estimation failed, keeping the previous solution";
+    }
+
+    if (pImpl->m_extEstimatorInitialized && pImpl->baseState == ExternalBaseState::useAsState)
+    {
+        pImpl->baseTransformSolution = pImpl->loPose;
+        pImpl->baseVelocitySolution = pImpl->loTwist;
     }
 
     // CoM position and velocity
@@ -1375,37 +1371,15 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
         return false;
     }
 
+    // reset the legged odometry to base transform solution integrated value
     Eigen::Quaterniond qB = Eigen::Quaterniond(baseTransformSolution.getRotation().asQuaternion()(0),
                                                baseTransformSolution.getRotation().asQuaternion()(1),
                                                baseTransformSolution.getRotation().asQuaternion()(2),
                                                baseTransformSolution.getRotation().asQuaternion()(3));
     extLeggedOdom->resetEstimator(qB, iDynTree::toEigen(baseTransformSolution.getPosition()));
 
-    if (itrCount < initThresh)
+    if (!m_extEstimatorInitialized)
     {
-        if (itrCount == initThresh-1)
-        {
-            if (!initializeEstimatorWorld())
-            {
-                yError() << LogPrefix << "Could not initialize estimator world." ;
-                return false;
-            }
-
-            // need to advance the estimator to update the states
-            if (!extLeggedOdom->advance()) {
-                yError() << LogPrefix << "Could not advance the external base estimator after initialization." ;
-                //return false;
-            }
-
-            // use the updated states to get the ground plane information
-            // assuming that the link with fixed frame is in flat surface contact with the ground plane
-            auto fixedFrameIdx = extLeggedOdom->getFixedFrameIdx();
-            auto w_H_f0 = extLeggedOdom->modelComputations().kinDyn()->getWorldTransform(fixedFrameIdx);
-            flatContactPlaneInclinationRoll =  w_H_f0.getRotation().asRPY()(0);
-            flatContactPlaneInclinationPitch =  w_H_f0.getRotation().asRPY()(1);
-            flatContactPlaneHeight = w_H_f0.getPosition()(2);
-        }
-        itrCount++;
         return true;
     }
 
@@ -1466,21 +1440,16 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
     iDynTree::Vector3 linV, angV;
     iDynTree::toEigen(linV) = out.baseTwist.head<3>();
     iDynTree::toEigen(angV) = out.baseTwist.tail<3>();
-    baseVelocitySolution.setLinearVec3(linV);
-    baseVelocitySolution.setAngularVec3(angV);
+
     loTwist.setLinearVec3(linV);
     loTwist.setAngularVec3(angV);
 
     iDynTree::Transform estTransform;
     iDynTree::Matrix4x4 pose;
     iDynTree::toEigen(pose) = out.basePose.transform();
-//     iDynTree::toEigen(pose).block<3, 3>(0, 0) = iDynTree::toEigen(linkTransformMatricesRaw.at("Pelvis").getRotation());
-    baseTransformSolution.fromHomogeneousTransform(pose);
+
     loPose.fromHomogeneousTransform(pose);
     estTransform.fromHomogeneousTransform(pose);
-
-//     auto pEst = baseTransformSolution.getPosition();
-//     auto rpyEst = baseTransformSolution.getRotation().asRPY();
 
     auto pEst = estTransform.getPosition();
     auto rpyEst = estTransform.getRotation().asRPY();
@@ -1509,7 +1478,7 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
     log.linkLinVel.row(estSize) << baseTwist(0), baseTwist(1), baseTwist(2);
     log.linkAngVel.row(estSize) << baseTwist(3), baseTwist(4), baseTwist(5);
 
-    auto ikPos =baseTransformSolution.getPosition();
+    auto ikPos = baseTransformSolution.getPosition();
     auto ikRPY = baseTransformSolution.getRotation().asRPY();
     auto ikLinV = baseVelocitySolution.getLinearVec3();
     auto ikAngV = baseVelocitySolution.getAngularVec3();
@@ -1536,19 +1505,27 @@ bool HumanKinematicEstimator::impl::updateExternalEstimatorAndDetector()
     return true;
 }
 
-bool HumanKinematicEstimator::impl::initializeEstimatorWorld()
+bool HumanKinematicEstimator::impl::initializeEstimatorWorld(const std::string& linkName)
 {
     if (!m_extEstimatorInitialized)
     {
-        auto b_H_w =  baseTransformSolution.inverse();
+        auto w_H_f = kinDynComputations->getWorldTransform(linkName);
+        auto f_H_w =  kinDynComputations->getWorldTransform(linkName).inverse();
 
-        auto quat = b_H_w.getRotation().asQuaternion();
-        if (!extLeggedOdom->resetEstimator("Pelvis",
+        auto quat = f_H_w.getRotation().asQuaternion();
+        if (!extLeggedOdom->resetEstimator(linkName,
                                            Eigen::Quaterniond(quat(0), quat(1), quat(2), quat(3)),
-                                           iDynTree::toEigen(b_H_w.getPosition())))
+                                           iDynTree::toEigen(f_H_w.getPosition())))
         {
             return false;
         }
+
+
+        // use the updated states to get the ground plane information
+        // assuming that the link with fixed frame is in flat surface contact with the ground plane
+        flatContactPlaneInclinationRoll =  w_H_f.getRotation().asRPY()(0);
+        flatContactPlaneInclinationPitch =  w_H_f.getRotation().asRPY()(1);
+        flatContactPlaneHeight = w_H_f.getPosition()(2);
 
         m_extEstimatorInitialized = true;
     }
@@ -1756,6 +1733,21 @@ bool HumanKinematicEstimator::impl::applyRpcCommand()
         // add new calibration
         secondaryCalibrationRotations.emplace(linkName,secondaryCalibrationRotation);
         yInfo() << LogPrefix << "secondary calibration for " << linkName << " is set";
+        break;
+    }
+    case rpcCommand::initializeExternalEstimatorWithWorld: {
+        std::string refLinkForCalibrationName = commandPro->refLinkName;
+        if(!(kinDynComputations->getRobotModel().isFrameNameUsed(refLinkForCalibrationName)))
+        {
+            yWarning() << LogPrefix << "link " << refLinkForCalibrationName << " choosen as base for secondaty calibration is not valid";
+            return false;
+        }
+
+        if (!initializeEstimatorWorld(refLinkForCalibrationName))
+        {
+            yWarning() << LogPrefix << "Failed to initialize external estimator choosen as base for secondaty calibration is not valid";
+            return false;
+        }
         break;
     }
     default: {
@@ -2006,8 +1998,7 @@ bool HumanKinematicEstimator::impl::solveIntegrationBasedInverseKinematics()
             * linkTransformMatrices[linkName].getRotation().inverse();
         iDynTree::Vector3 angularVelocityError;
 
-//         angularVelocityError = iDynTreeHelper::Rotation::skewVee(rotationError);
-        angularVelocityError = rotationError.log();
+        angularVelocityError = iDynTreeHelper::Rotation::skewVee(rotationError);
         iDynTree::toEigen(integralOrientationError) =
             iDynTree::toEigen(integralOrientationError)
             + iDynTree::toEigen(angularVelocityError) * dt;
@@ -2104,7 +2095,7 @@ bool HumanKinematicEstimator::impl::solveIntegrationBasedInverseKinematics()
         stateIntegrator.getBasePose(baseTransformSolution);
     }
     else {
-        stateIntegrator.integrate(jointVelocitiesSolutionFiltered, dt);
+        stateIntegrator.integrate(jointVelocitiesSolution, dt);
         stateIntegrator.getJointConfiguration(jointConfigurationSolution);
     }
     return true;

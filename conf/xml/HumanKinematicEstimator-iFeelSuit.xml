@@ -10,7 +10,7 @@
     </device>
 
     <device type="human_kinematic_estimator" name="HumanKinematicEstimator">
-        <param name="period">0.02</param>
+        <param name="period">0.01</param>
         <param name="urdf">humanSubject08_48dof.urdf</param>
 <!--         <param name="urdf">humanSubject02_66dof.urdf</param> -->
         <param name="floatingBaseFrame">Pelvis</param>
@@ -78,17 +78,17 @@
             <!-- quaternion w x y z -->
             <param name="initial_world_orientation_in_ref_frame">(1., 0., 0., 0.)</param>
             <param name="initial_world_position_in_ref_frame">(0., 0., 0.)</param>
-            <param name="switching_pattern">useExternal</param>
-            <param name="vel_computation_method">multiLS</param>
+            <param name="switching_pattern">latest</param>
+            <param name="vel_computation_method">single</param>
         </group>
         <group name="SchmittTriggerParams">
-            <param name="contacts">(LeftFoot, RightFoot)</param>
+            <param name="contacts">(LeftToe, RightToe)</param>
 <!--            <param name="contact_make_thresholds">(400.0, 400.0)</param>
             <param name="contact_break_thresholds">(350.0, 350.0)</param>-->
-            <param name="contact_make_thresholds">(250.0, 250.0)</param>
-            <param name="contact_break_thresholds">(200.0, 200.0)</param>
-            <param name="contact_make_switch_times">(0.02, 0.02)</param>
-            <param name="contact_break_switch_times">(0.02, 0.02)</param>
+            <param name="contact_make_thresholds">(200.0, 200.0)</param>
+            <param name="contact_break_thresholds">(50.0, 70.0)</param>
+            <param name="contact_make_switch_times">(0.01, 0.01)</param>
+            <param name="contact_break_switch_times">(0.01, 0.01)</param>
         </group>
         <group name="ContactBayesFilter">
             <param name="verbose">false</param>
